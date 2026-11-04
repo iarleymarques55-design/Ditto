@@ -1,16 +1,7 @@
-import { BrowserRouter, Route, Routes } from 'react-router'
-import Home from './pages/Home.jsx'
-import Painel from './pages/Painel.jsx'
+import AppRouter from './routes/AppRouter.jsx'
 
 function App() {
-  return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/painel" element={<Painel />} />
-      </Routes>
-    </BrowserRouter>
-  )
+  return <AppRouter />
 }
 
 export default App
