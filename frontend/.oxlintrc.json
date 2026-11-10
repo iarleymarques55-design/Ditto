@@ -1,0 +1,5 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "oxc", "eslint", "jsx-a11y"],
+  "env": { "browser": true, "es2024": true }
+}

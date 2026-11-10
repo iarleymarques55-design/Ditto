@@ -1,0 +1,21 @@
+# Ambiente virtual e caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Arquivos gerados pelas execuções
+storage/
+
+# Segredos (o .env.example é versionado)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials.json
+service-account*.json

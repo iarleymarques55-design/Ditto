@@ -1,0 +1,20 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "B", "UP"]
+# O ruff format já cuida das linhas de código; textos longos ficam inteiros
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends() como valor padrão é o padrão do FastAPI
+extend-immutable-calls = ["fastapi.Depends"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "S603", "S607"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
