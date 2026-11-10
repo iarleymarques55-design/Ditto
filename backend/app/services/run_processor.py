@@ -34,6 +34,7 @@ from app.services.engine.browser import host_matches, new_guarded_context
 from app.services.engine.executor import StepOutcome, StepPlan, StepRunner
 from app.services.engine.llm_repair import LlmRepairer
 from app.services.repair_service import save_new_version
+from app.services.sanitizer import scrub
 from app.services.templating import render, rule_values, safe_relative_path
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ class RunProcessor:
 
         item.status = ItemStatus.RUNNING
         item.error_message = None
+        item.output = {}
         self.session.commit()
 
         started = time.monotonic()
@@ -131,6 +133,9 @@ class RunProcessor:
             page = context.new_page()
             runner = self._new_runner(page, item)
             for step in self.steps:
+                # Um clique pode ter aberto outra janela: o próximo passo acontece nela
+                page = context.pages[-1] if context.pages else page
+                runner.page = page
                 if not self._run_step(page, runner, item, step, values):
                     return
             self._finish_item(item, started)
@@ -254,6 +259,8 @@ class RunProcessor:
             targets=[version.target for version in versions],
             allowed_domains=self.flow.allowed_domains,
             secrets=secrets,
+            capture_kind=step.capture_kind,
+            has_recorded_login=any(item.credential_field for item in self.flow.steps),
         )
 
     def _record_event(
@@ -280,7 +287,28 @@ class RunProcessor:
             self._promote_old_version(step, outcome.target_index)
         if outcome.download is not None:
             self._save_download(item, step, outcome, values)
+        if outcome.captured is not None:
+            self._save_capture(item, step, outcome.captured, values)
         self.session.commit()
+
+    def _save_capture(
+        self,
+        item: RunItem,
+        step: Step,
+        captured: str | list[dict[str, str]],
+        values: dict[str, str],
+    ) -> None:
+        # Se o portal exibir uma senha salva na tela, ela não vai parar na planilha
+        secrets = [
+            secret for credential in self.credentials.values() for secret in credential.values()
+        ]
+        if isinstance(captured, str):
+            clean: str | list[dict[str, str]] = scrub(captured, secrets)
+            values[step.capture_key] = clean
+        else:
+            clean = [{name: scrub(cell, secrets) for name, cell in row.items()} for row in captured]
+        # Cópia nova: o SQLAlchemy só percebe a mudança em um JSON quando o objeto é outro
+        item.output = {**item.output, step.capture_key: clean}
 
     def _save_repair(self, item: RunItem, step: Step, outcome: StepOutcome) -> None:
         save_new_version(

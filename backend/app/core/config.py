@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     jwt_secret: SecretStr = Field(min_length=32)
     jwt_expires_minutes: int = 480
+    recording_token_minutes: int = 120
     # Separadas por vírgula, da mais nova para a mais antiga
     fernet_keys: SecretStr
 
@@ -51,6 +52,8 @@ class Settings(BaseSettings):
     stale_run_minutes: int = 5
 
     step_timeout_ms: int = 15000
+    # Quanto esperar um elemento aparecer antes de achar que o site mudou
+    element_wait_ms: int = 10000
     postcondition_timeout_ms: int = 8000
     browser_channel: str | None = None
     browser_headless: bool = True

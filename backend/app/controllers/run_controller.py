@@ -1,5 +1,5 @@
 import uuid
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Path, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
@@ -24,6 +24,8 @@ from app.schemas.run import RunDetail, RunSummary
 from app.services.run_service import RunService
 
 router = APIRouter(tags=["Execuções"], responses=UNAUTHORIZED_RESPONSE)
+
+_XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 RunId = Annotated[uuid.UUID, Path(description="Identificador da execução.")]
 
@@ -134,16 +136,52 @@ def download_report(run_id: RunId, user: CurrentUser, session: DbSession) -> Res
 @router.get(
     "/runs/{run_id}/export",
     response_class=Response,
-    summary="Baixar o resultado em CSV",
-    description="Exporta uma linha por cópia. Células que virariam fórmula no Excel saem neutralizadas.",
+    summary="Baixar o resultado",
+    description=(
+        "Exporta uma linha por cópia, com os dados capturados, em CSV ou Excel. O Excel também traz uma "
+        "aba para cada tabela capturada. Células que virariam fórmula saem neutralizadas."
+    ),
     responses={
         **NOT_FOUND_RESPONSE,
-        200: {"content": {"text/csv": {}}, "description": "A planilha."},
+        200: {
+            "content": {
+                "text/csv": {},
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
+            },
+            "description": "A planilha.",
+        },
     },
 )
-def export_run(run_id: RunId, user: CurrentUser, session: DbSession) -> Response:
-    file_name, content = RunService(session).export_csv(run_id, user.id)
+def export_run(
+    run_id: RunId,
+    user: CurrentUser,
+    session: DbSession,
+    file_format: Annotated[
+        Literal["csv", "xlsx"], Query(alias="format", description="Formato do arquivo.")
+    ] = "csv",
+) -> Response:
+    service = RunService(session)
+    if file_format == "xlsx":
+        file_name, content = service.export_xlsx(run_id, user.id)
+        return _attachment(file_name, content, _XLSX_TYPE)
+    file_name, content = service.export_csv(run_id, user.id)
     return _attachment(file_name, content, "text/csv; charset=utf-8")
+
+
+@router.get(
+    "/runs/{run_id}/items/{item_id}/output",
+    response_model=dict[str, Any],
+    summary="Ver os dados capturados de uma linha",
+    description="Devolve tudo o que esta linha capturou da tela, incluindo tabelas inteiras.",
+    responses=NOT_FOUND_RESPONSE,
+)
+def get_item_output(
+    run_id: RunId,
+    item_id: Annotated[uuid.UUID, Path(description="Identificador da linha.")],
+    user: CurrentUser,
+    session: DbSession,
+) -> dict[str, Any]:
+    return RunService(session).get_item_output(run_id, item_id, user.id)
 
 
 @router.get(

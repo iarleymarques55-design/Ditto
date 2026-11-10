@@ -1,11 +1,12 @@
 """Um passo só conta como feito quando a pós-condição é verdadeira: o clique funcionar não basta."""
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from playwright.sync_api import ElementHandle, Locator, Page
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Locator, Page
 
 from app.core.config import settings
 from app.models.enums import StepAction
@@ -19,7 +20,25 @@ PAGE_CHANGED = "page_changed"
 
 VERIFIABLE_TYPES = {DOWNLOAD, URL_CONTAINS, TEXT_VISIBLE, FIELD_VALUE, PAGE_CHANGED}
 
-_PAGE_FINGERPRINT = "() => [location.href, document.body ? document.body.innerText.length : 0, document.querySelectorAll('*').length].join('|')"
+# Um clique pode só trocar uma aba ou abrir um menu: conta o texto e o estado dos elementos, não só o tamanho
+_PAGE_FINGERPRINT = """() => {
+  const hash = (seed, text) => {
+    let value = seed;
+    for (let i = 0; i < text.length; i++) value = (value * 31 + text.charCodeAt(i)) | 0;
+    return value;
+  };
+  const elements = document.querySelectorAll('*');
+  let state = 0;
+  for (const el of elements) {
+    state = hash(state, el.getAttribute('class') || '');
+    for (const name of ['aria-expanded', 'aria-selected', 'aria-checked', 'aria-pressed', 'open', 'hidden']) {
+      if (el.hasAttribute(name)) state = hash(state, name + el.getAttribute(name));
+    }
+    if (el.checked) state = hash(state, 'checked');
+  }
+  const text = document.body ? document.body.innerText : '';
+  return [location.href, hash(0, text), elements.length, state].join('|');
+}"""
 _POLL_SECONDS = 0.1
 
 
@@ -29,10 +48,15 @@ class PageState:
 
 
 def capture_state(page: Page) -> PageState:
-    try:
-        return PageState(page.evaluate(_PAGE_FINGERPRINT))
-    except PlaywrightError:
-        return PageState("")
+    """Soma os iframes: um clique dentro de um deles também muda a página."""
+    # Abrir uma janela nova também é a página respondendo ao clique
+    parts = [str(len(page.context.pages))]
+    for frame in page.frames:
+        try:
+            parts.append(frame.evaluate(_PAGE_FINGERPRINT))
+        except PlaywrightError:
+            parts.append("")
+    return PageState("#".join(parts))
 
 
 def _wait_until(condition) -> bool:
@@ -49,7 +73,14 @@ def _wait_until(condition) -> bool:
         time.sleep(_POLL_SECONDS)
 
 
-def _field_matches(locator: Locator, action: StepAction, expected: str | None) -> bool:
+def _comparable(text: str) -> str:
+    # Campos com máscara mostram "11.222.333/0001-81" para quem digitou só os números
+    return re.sub(r"\W+", "", text).casefold()
+
+
+def _field_matches(
+    locator: Locator | ElementHandle, action: StepAction, expected: str | None
+) -> bool:
     if action == StepAction.CHECK:
         return locator.is_checked()
     if action == StepAction.SELECT:
@@ -57,7 +88,25 @@ def _field_matches(locator: Locator, action: StepAction, expected: str | None) -
             "el => [el.value, el.selectedOptions[0] ? el.selectedOptions[0].text.trim() : '']"
         )
         return expected in selected
-    return locator.input_value() == (expected or "")
+    current = locator.evaluate("el => el.isContentEditable ? el.innerText : el.value")
+    wanted = expected or ""
+    return current == wanted or _comparable(current) == _comparable(wanted)
+
+
+def _filled_field_matches(
+    filled: ElementHandle | None, locator: Locator, action: StepAction, expected: str | None
+) -> bool:
+    """Confere o próprio elemento preenchido: procurar de novo pode achar mais de um, como a lista
+    de sugestões que abre com o mesmo nome. Se o site trocou o campo, vale o primeiro encontrado."""
+    for field in (filled, locator.first):
+        if field is None:
+            continue
+        try:
+            if _field_matches(field, action, expected):
+                return True
+        except PlaywrightError:
+            continue
+    return False
 
 
 def check(
@@ -68,6 +117,7 @@ def check(
     locator: Locator | None,
     value: str | None,
     before: PageState,
+    filled: ElementHandle | None = None,
 ) -> bool:
     """Downloads são conferidos por quem executa a ação, porque precisam começar antes do clique."""
     kind = postcondition.get("type", NONE)
@@ -81,7 +131,9 @@ def check(
             lambda: page.get_by_text(postcondition.get("value", "")).first.is_visible()
         )
     if kind == FIELD_VALUE:
-        return locator is not None and _wait_until(lambda: _field_matches(locator, action, value))
+        return locator is not None and _wait_until(
+            lambda: _filled_field_matches(filled, locator, action, value)
+        )
     if kind == PAGE_CHANGED:
         return _wait_until(lambda: capture_state(page).fingerprint != before.fingerprint)
     return False

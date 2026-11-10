@@ -37,7 +37,18 @@ def get_current_user(
     return AuthService(session).get_user_from_token(credentials.credentials)
 
 
+def get_recording_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer)],
+    session: Annotated[Session, Depends(get_db)],
+) -> User:
+    """Aceita também o token da extensão, que não vale em nenhuma outra rota."""
+    if credentials is None:
+        raise UnauthorizedError
+    return AuthService(session).get_user_from_token(credentials.credentials, allow_recording=True)
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+RecordingUser = Annotated[User, Depends(get_recording_user)]
 DbSession = Annotated[Session, Depends(get_db)]
 Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Tamanho da página (máximo 100).")]
 Offset = Annotated[int, Query(ge=0, description="Quantos registros pular.")]

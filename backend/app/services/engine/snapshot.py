@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page
 
 MARKER_ATTRIBUTE = "data-ditto-id"
@@ -138,6 +139,13 @@ def take_snapshot(page: Page) -> list[PageElement]:
 
 def locator_for(page: Page, element: PageElement) -> Locator:
     return page.locator(f'[{MARKER_ATTRIBUTE}="{element.index}"]')
+
+
+def has_login_form(page: Page) -> bool:
+    try:
+        return page.locator("input[type=password]:visible").count() > 0
+    except PlaywrightError:
+        return False
 
 
 def has_captcha(page: Page) -> bool:

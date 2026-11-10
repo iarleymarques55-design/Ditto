@@ -5,7 +5,8 @@ import EstadoConsulta from '../../../components/ui/EstadoConsulta.jsx'
 import { formatarDuracao, formatarQuando } from '../../../lib/datas.js'
 import { useTituloPagina } from '../../../lib/useTituloPagina.js'
 import { ListaPedidos, usePedidos } from '../../reparos/index.js'
-import { baixarRelatorio, cancelarExecucao, exportarPlanilha } from '../api.js'
+import { baixarRelatorio, cancelarExecucao, exportarExcel, exportarPlanilha } from '../api.js'
+import DadosCapturados from '../components/DadosCapturados.jsx'
 import DetalheCopia from '../components/DetalheCopia.jsx'
 import LogExecucao from '../components/LogExecucao.jsx'
 import ProgressoLote from '../components/ProgressoLote.jsx'
@@ -114,8 +115,14 @@ function Detalhe({ execucao, aoMudar }) {
         </div>
       </section>
 
+      {execucao.capturas.length > 0 && (
+        <DadosCapturados capturas={execucao.capturas} itens={execucao.itens} aoBaixar={() => baixar(exportarExcel)} />
+      )}
+
       <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-        <section aria-label="Detalhes da cópia escolhida">{item && <DetalheCopia item={item} passos={execucao.passos} />}</section>
+        <section aria-label="Detalhes da cópia escolhida">
+          {item && <DetalheCopia execucaoId={execucao.id} item={item} passos={execucao.passos} capturas={execucao.capturas} />}
+        </section>
 
         <section aria-labelledby="registro-titulo">
           <h2 id="registro-titulo" className="font-display text-[19px] font-bold text-navy">
@@ -134,6 +141,11 @@ function Detalhe({ execucao, aoMudar }) {
               <Botao variante="discreto" onClick={() => baixar(baixarRelatorio)}>
                 Baixar relatório em PDF
               </Botao>
+              {execucao.capturas.length === 0 && (
+                <Botao variante="discreto" onClick={() => baixar(exportarExcel)}>
+                  Baixar em Excel
+                </Botao>
+              )}
               <Botao variante="discreto" onClick={() => baixar(exportarPlanilha)}>
                 Exportar em CSV
               </Botao>

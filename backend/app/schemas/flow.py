@@ -6,11 +6,13 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import FlowStatus, StepAction, VariableSource, VariableStatus
+from app.models.enums import CaptureKind, FlowStatus, StepAction, VariableSource, VariableStatus
 from app.schemas.run import RunSummary
 from app.schemas.schedule import ScheduleResponse
+from app.services.templating import slugify
 
 MAX_STEPS = 200
+ANCHOR_KINDS = {"table_header", "definition", "label", "inline", "adjacent"}
 _HOSTNAME = re.compile(
     r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
 )
@@ -48,6 +50,15 @@ class RecordedTarget(BaseModel):
     )
     name: str | None = Field(default=None, max_length=200, description="Atributo `name` do campo.")
     test_id: str | None = Field(default=None, max_length=200, description="Atributo `data-testid`.")
+    anchor: str | None = Field(
+        default=None, max_length=300, description="Em capturas: o texto fixo ao redor do dado."
+    )
+    anchor_kind: str | None = Field(
+        default=None, max_length=20, description="Em capturas: como a âncora se liga ao dado."
+    )
+    row_index: int | None = Field(
+        default=None, ge=0, le=100000, description="Em capturas de tabela: a linha do valor."
+    )
     css: str | None = Field(
         default=None, max_length=1000, description="Seletor CSS no momento da gravação."
     )
@@ -63,6 +74,13 @@ class RecordedTarget(BaseModel):
     relative_position: str | None = Field(
         default=None, max_length=200, description="Posição descrita em palavras."
     )
+
+    @field_validator("anchor_kind")
+    @classmethod
+    def _check_anchor_kind(cls, value: str | None) -> str | None:
+        if value is not None and value not in ANCHOR_KINDS:
+            raise ValueError("tipo de âncora desconhecido")
+        return value
 
     @field_validator("neighbors")
     @classmethod
@@ -92,6 +110,29 @@ class RecordedStep(BaseModel):
         pattern=r"^[A-Za-z0-9]+$",
         description="Extensão do arquivo baixado por este passo.",
     )
+
+    capture_name: str | None = Field(
+        default=None, min_length=1, max_length=120, description="Em `capture`: o nome do dado."
+    )
+    capture_kind: CaptureKind | None = Field(
+        default=None, description="Em `capture`: um valor ou uma tabela inteira."
+    )
+    value_from_capture: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Em vez de `value`: o nome de um dado capturado em um passo anterior.",
+    )
+
+    @model_validator(mode="after")
+    def _check_capture(self) -> "RecordedStep":
+        is_capture = self.action == StepAction.CAPTURE
+        if is_capture and not self.capture_name:
+            raise ValueError("um passo capture precisa de capture_name")
+        if not is_capture and (self.capture_name or self.capture_kind):
+            raise ValueError("capture_name só vale em passos capture")
+        if self.value_from_capture and self.action not in {StepAction.FILL, StepAction.SELECT}:
+            raise ValueError("value_from_capture só vale em fill e select")
+        return self
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "RecordedStep":
@@ -141,11 +182,39 @@ class RecordingCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=160, description="Nome da tarefa.")
     start_url: str = Field(max_length=2000, description="Endereço onde a gravação começou.")
+    allowed_hosts: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Domínios visitados durante a gravação, como o de um login em outro endereço.",
+    )
     steps: list[RecordedStep] = Field(
         min_length=1, max_length=MAX_STEPS, description="Passos na ordem em que aconteceram."
     )
 
     _check_start_url = field_validator("start_url")(_check_web_url)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _normalize_hosts(cls, value: list[str]) -> list[str]:
+        return [normalize_host(item) for item in value]
+
+    @model_validator(mode="after")
+    def _check_captures(self) -> "RecordingCreate":
+        """Cada dado tem um nome só, e um passo só pode usar o que já foi capturado antes dele."""
+        kinds: dict[str, CaptureKind] = {}
+        for step in self.steps:
+            if step.value_from_capture:
+                kind = kinds.get(slugify(step.value_from_capture))
+                if kind is None:
+                    raise ValueError("value_from_capture usa um dado que ainda não foi capturado")
+                if kind == CaptureKind.TABLE:
+                    raise ValueError("uma tabela inteira não cabe em um campo")
+            if step.action == StepAction.CAPTURE:
+                key = slugify(step.capture_name)
+                if key in kinds:
+                    raise ValueError("dois dados capturados têm o mesmo nome")
+                kinds[key] = step.capture_kind or CaptureKind.VALUE
+        return self
 
 
 class FlowUpdate(BaseModel):
@@ -220,6 +289,12 @@ class StepResponse(BaseModel):
     irreversible: bool = Field(description="`true` quando o passo não tem volta.")
     auto_confirm: bool = Field(description="`true` quando segue sem pedir confirmação.")
     save_as: str | None = Field(description="Caminho do arquivo gerado, quando houver.")
+    filled_from_capture: str | None = Field(
+        description="Chave do dado capturado que este passo digita, se houver."
+    )
+    capture_key: str | None = Field(description="Em capturas: a chave do dado.")
+    capture_label: str | None = Field(description="Em capturas: o nome do dado.")
+    capture_kind: CaptureKind | None = Field(description="Em capturas: valor ou tabela.")
     repaired_at: datetime | None = Field(
         description="Quando o caminho atual foi encontrado por um reparo."
     )

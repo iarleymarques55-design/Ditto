@@ -12,6 +12,7 @@ from app.controllers.dependencies import (
     DbSession,
     Limit,
     Offset,
+    RecordingUser,
 )
 from app.schemas.common import Page
 from app.schemas.flow import (
@@ -39,7 +40,7 @@ FlowId = Annotated[uuid.UUID, Path(description="Identificador da tarefa.")]
         "mesmo que a extensão tenha enviado."
     ),
 )
-def create_flow(payload: RecordingCreate, user: CurrentUser, session: DbSession) -> FlowDetail:
+def create_flow(payload: RecordingCreate, user: RecordingUser, session: DbSession) -> FlowDetail:
     return FlowService(session).create_from_recording(user.id, payload)
 
 

@@ -54,6 +54,11 @@ function mapearResumo(fluxo) {
   }
 }
 
+function mapearCaptura(passo) {
+  if (!passo.capture_key) return null
+  return { chave: passo.capture_key, rotulo: passo.capture_label, tipo: passo.capture_kind === 'table' ? 'tabela' : 'valor' }
+}
+
 function mapearPasso(passo) {
   return {
     id: passo.id,
@@ -64,8 +69,16 @@ function mapearPasso(passo) {
     usaAcesso: passo.uses_credential,
     irreversivel: passo.irreversible,
     autoConfirma: passo.auto_confirm,
+    captura: mapearCaptura(passo),
+    digitaDado: passo.filled_from_capture,
     reparo: passo.repaired_at ? { em: passo.repaired_at, caminho: passo.current_path } : null,
   }
+}
+
+// Um passo que digita um dado capturado mostra o nome dele, e não a chave interna
+function comNomeDoDado(passos) {
+  const nomes = new Map(passos.filter((passo) => passo.captura).map((passo) => [passo.captura.chave, passo.captura.rotulo]))
+  return passos.map((passo) => ({ ...passo, digitaDado: nomes.get(passo.digitaDado) ?? null }))
 }
 
 function mapearDetalhe(fluxo) {
@@ -74,7 +87,7 @@ function mapearDetalhe(fluxo) {
     dominios: fluxo.allowed_domains,
     usaAcesso: fluxo.uses_credential,
     precisaAcesso: fluxo.needs_credential,
-    passos: fluxo.steps.map(mapearPasso),
+    passos: comNomeDoDado(fluxo.steps.map(mapearPasso)),
     variaveis: fluxo.variables.map(mapearVariavel),
   }
 }
@@ -86,10 +99,6 @@ export async function listarFluxos() {
 
 export async function obterFluxo(id) {
   return mapearDetalhe(await pedir(`/flows/${id}`))
-}
-
-export async function importarGravacao(gravacao) {
-  return mapearDetalhe(await pedir('/flows', { metodo: 'POST', corpo: gravacao }))
 }
 
 export function responderVariavel(fluxoId, variavelId, muda) {

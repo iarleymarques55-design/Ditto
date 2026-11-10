@@ -2,6 +2,7 @@ import csv
 import io
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError
 from app.models.enums import (
     ArtifactKind,
+    CaptureKind,
     HelpStatus,
     LogLevel,
     RunStatus,
@@ -24,6 +26,7 @@ from app.schemas.common import Page
 from app.schemas.run import RunDetail, RunSummary
 from app.services import presenters, run_lifecycle, storage
 from app.services.batch import neutralize_cell, parse_rows
+from app.services.excel_report import build_workbook
 from app.services.pdf_report import ITEM_STATUS_LABELS, build_run_report
 
 _FINISHED = {RunStatus.SUCCEEDED, RunStatus.PARTIAL, RunStatus.FAILED, RunStatus.CANCELED}
@@ -129,11 +132,35 @@ class RunService:
         counts = self.runs.counts_for([run.id]).get(run.id)
         return f"relatorio-{run.id}.pdf", build_run_report(run, counts)
 
+    def get_item_output(
+        self, run_id: uuid.UUID, item_id: uuid.UUID, owner_id: uuid.UUID
+    ) -> dict[str, Any]:
+        run = self._get(run_id, owner_id)
+        item = next((candidate for candidate in run.items if candidate.id == item_id), None)
+        if item is None:
+            raise NotFoundError("Esta linha não foi encontrada.")
+        return item.output or {}
+
+    def export_xlsx(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[str, bytes]:
+        run = self._get(run_id, owner_id)
+        return f"execucao-{run.id}.xlsx", build_workbook(run)
+
     def export_csv(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[str, bytes]:
         run = self._get(run_id, owner_id)
+        values = [s for s in run.flow.steps if s.capture_kind == CaptureKind.VALUE]
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter=";")
-        writer.writerow(["linha", "nome", "situacao", "duracao_segundos", "arquivo", "erro"])
+        writer.writerow(
+            [
+                "linha",
+                "nome",
+                "situacao",
+                *(step.capture_label for step in values),
+                "duracao_segundos",
+                "arquivo",
+                "erro",
+            ]
+        )
         for item in run.items:
             file = next((a.file_name for a in item.artifacts if a.kind == ArtifactKind.FILE), "")
             writer.writerow(
@@ -141,6 +168,10 @@ class RunService:
                     item.position,
                     neutralize_cell(item.label),
                     ITEM_STATUS_LABELS[item.status],
+                    *(
+                        neutralize_cell(str((item.output or {}).get(s.capture_key, "")))
+                        for s in values
+                    ),
                     round(item.duration_ms / 1000, 1) if item.duration_ms else "",
                     neutralize_cell(file),
                     neutralize_cell(item.error_message or ""),

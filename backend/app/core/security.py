@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.exceptions import UnauthorizedError
 
 ALGORITHM = "HS256"
+RECORDING_SCOPE = "recording"
 # Comparado quando o e-mail não existe, para o tempo de resposta não revelar quem tem conta
 _DUMMY_HASH = bcrypt.hashpw(b"ditto-usuario-inexistente", bcrypt.gensalt())
 
@@ -34,8 +35,17 @@ def create_access_token(user_id: uuid.UUID) -> str:
     return jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
 
 
-def decode_access_token(token: str) -> tuple[uuid.UUID, int]:
-    """Devolve a conta e o instante em que o token foi emitido."""
+def create_recording_token(user_id: uuid.UUID) -> tuple[str, datetime]:
+    """Token da extensão: dura pouco e só serve para enviar gravações, nunca para ler a conta."""
+    now = datetime.now(UTC)
+    expires_at = now + timedelta(minutes=settings.recording_token_minutes)
+    payload = {"sub": str(user_id), "iat": now, "exp": expires_at, "scope": RECORDING_SCOPE}
+    token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
+    return token, expires_at
+
+
+def decode_access_token(token: str) -> tuple[uuid.UUID, int, str | None]:
+    """Devolve a conta, o instante em que o token foi emitido e o escopo, se houver."""
     try:
         payload = jwt.decode(
             token,
@@ -43,6 +53,10 @@ def decode_access_token(token: str) -> tuple[uuid.UUID, int]:
             algorithms=[ALGORITHM],
             options={"require": ["exp", "iat", "sub"]},
         )
-        return uuid.UUID(payload["sub"]), int(payload["iat"])
+        return (
+            uuid.UUID(payload["sub"]),
+            int(payload["iat"]),
+            payload.get("scope"),
+        )
     except (jwt.PyJWTError, ValueError, TypeError) as error:
         raise UnauthorizedError from error

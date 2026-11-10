@@ -15,6 +15,7 @@ from app.core.exceptions import (
 )
 from app.core.rate_limit import rate_limiter
 from app.core.security import (
+    RECORDING_SCOPE,
     create_access_token,
     decode_access_token,
     hash_password,
@@ -119,8 +120,11 @@ class AuthService:
             User(email=email, name=claims.get("name") or email, google_sub=claims["sub"])
         )
 
-    def get_user_from_token(self, token: str) -> User:
-        user_id, issued_at = decode_access_token(token)
+    def get_user_from_token(self, token: str, *, allow_recording: bool = False) -> User:
+        user_id, issued_at, scope = decode_access_token(token)
+        # O token da extensão só vale na rota que recebe gravações
+        if scope is not None and not (allow_recording and scope == RECORDING_SCOPE):
+            raise UnauthorizedError
         user = self.users.get_by_id(user_id)
         if user is None:
             raise UnauthorizedError

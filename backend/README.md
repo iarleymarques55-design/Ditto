@@ -4,7 +4,7 @@ API e motor de execução do Ditto. O backend guarda as tarefas gravadas no nave
 
 Para a visão do produto, veja o [README principal](../README.md).
 
-> **Estado atual:** implementado e testado, exceto a extensão do Chrome, que ainda não existe. Por enquanto, as gravações entram por um arquivo JSON importado no painel ([formato](#formato-da-gravação)).
+> **Estado atual:** implementado e testado. As gravações chegam pela [extensão do Chrome](../extension/README.md), que também captura dados da tela ([formato](#formato-da-gravação)).
 >
 > **Testado contra o serviço real:** Groq, com o modelo `openai/gpt-oss-120b`.
 >
@@ -76,7 +76,7 @@ flowchart LR
 
 ### 1. Gravar
 
-`POST /api/v1/flows` recebe os passos com a impressão digital de cada elemento. O backend não confia no envio: valor de campo de senha é descartado, e o campo de texto logo antes dele é tratado como usuário de login. Os dois passam a usar uma credencial salva.
+A [extensão](../extension/README.md) observa a tarefa e envia para `POST /api/v1/flows` os passos com a impressão digital de cada elemento. Ela usa um token próprio, pedido em `POST /auth/recording-token`: dura 2 horas e só serve para essa rota. O backend não confia no envio: valor de campo de senha é descartado, e o campo de texto logo antes dele é tratado como usuário de login. Os dois passam a usar uma credencial salva.
 
 ### 2. Entender
 
@@ -120,6 +120,12 @@ Regras da execução:
 - **A falha de uma linha não derruba o lote.** Valor que não existe no portal é dado errado, não layout novo: a linha falha e a próxima começa.
 - **Disjuntor:** 3 linhas seguidas com falha param a execução, para não bloquear a conta no portal com tentativas de login erradas.
 - **Um reparo vale para o resto do lote.** Se a loja 01 achou o caminho novo, as outras já o usam.
+
+### Ler dados da tela
+
+Um passo `capture` lê um valor ou uma tabela e guarda no resultado da linha (`RunItem.output`). O valor vai para uma coluna do Excel, e pode ser digitado em um passo seguinte, como copiar a situação de um portal para o ERP. Cada tabela ganha uma aba própria.
+
+O dado é localizado pelo **rótulo** que fica perto dele ("Situação", o cabeçalho da coluna), nunca pelo próprio valor, que muda a cada linha. Por isso a captura não usa as camadas 2 e 3: um dado errado passaria despercebido, então, se o rótulo sumir, o Ditto para e pede ajuda. Senhas e cartões nunca são lidos, e uma senha salva que apareça na tela é apagada do resultado.
 
 ### 5. Reparar: a escada de 4 camadas
 
@@ -190,6 +196,7 @@ Todas as rotas ficam em `/api/v1` e estão documentadas em `/docs`, que só abre
 | Rotas | O que fazem |
 |---|---|
 | `POST /auth/register`, `/auth/login`, `/auth/google`, `GET /auth/me` | Conta e login |
+| `POST /auth/recording-token` | Token curto para a extensão enviar uma gravação |
 | `PATCH`, `DELETE /account`, `POST /account/password` | Nome, avisos por e-mail, senha e exclusão da conta |
 | `GET`, `PUT`, `DELETE /account/avatar` | Foto de perfil |
 | `GET /dashboard/summary` | Resumo do dia para a Mesa |
@@ -197,7 +204,8 @@ Todas as rotas ficam em `/api/v1` e estão documentadas em `/docs`, que só abre
 | `PATCH /flows/{id}/steps/{id}` | Editar intenção, "não tem volta" e onde salvar |
 | `POST /flows/{id}/variables/{id}/answer`, `POST /flows/{id}/confirm` | Responder perguntas e ativar |
 | `GET`, `POST /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel` | Execuções, com CSV ou Excel |
-| `GET /runs/{id}/report`, `/runs/{id}/export`, `GET /artifacts/{id}` | PDF, CSV e arquivos gerados |
+| `GET /runs/{id}/report`, `/runs/{id}/export?format=csv\|xlsx`, `GET /artifacts/{id}` | PDF, CSV, Excel e arquivos gerados |
+| `GET /runs/{id}/items/{id}/output` | Dados capturados em uma linha, com as tabelas inteiras |
 | `GET /repairs`, `/repairs/stats` | Histórico e passos por camada |
 | `GET /help-requests`, `POST /help-requests/{id}/answer` | Pedidos de ajuda |
 | `GET`, `POST /credentials`, `DELETE /credentials/{id}` | Acessos; a senha nunca volta na resposta |
@@ -211,12 +219,13 @@ Os erros têm sempre o mesmo formato, e erros de validação nunca devolvem o va
 
 ## Formato da gravação
 
-É o que a extensão vai enviar, e o que o botão "Gravar tarefa" do painel importa hoje.
+É o que a extensão envia.
 
 ```json
 {
   "name": "Relatório mensal por loja",
   "start_url": "https://portal.fornecedor.com/relatorios",
+  "allowed_hosts": ["portal.fornecedor.com", "login.fornecedor.com"],
   "steps": [
     { "action": "navigate", "url": "https://portal.fornecedor.com/relatorios" },
     {
@@ -228,12 +237,30 @@ Os erros têm sempre o mesmo formato, e erros de validação nunca devolvem o va
       "action": "click",
       "target": { "role": "button", "text": "Exportar PDF", "neighbors": ["Imprimir", "Excel"] },
       "downloaded_extension": "pdf"
+    },
+    {
+      "action": "capture",
+      "capture_name": "Situação",
+      "target": { "tag": "dd", "anchor": "Situação", "anchor_kind": "definition" }
+    },
+    {
+      "action": "capture",
+      "capture_name": "Notas",
+      "capture_kind": "table",
+      "target": { "tag": "table", "neighbors": ["Número", "Valor"], "css": "#notas" }
+    },
+    {
+      "action": "fill",
+      "value_from_capture": "Situação",
+      "target": { "role": "textbox", "label": "Situação no ERP", "css": "#situacao" }
     }
   ]
 }
 ```
 
-`action` aceita `navigate`, `click`, `fill`, `select`, `check` e `press`. O campo `target` aceita `role`, `tag`, `text`, `label`, `placeholder`, `name`, `test_id`, `css`, `input_type`, `autocomplete`, `neighbors` e `relative_position`.
+`action` aceita `navigate`, `click`, `fill`, `select`, `check`, `press` e `capture`. O campo `target` aceita `role`, `tag`, `text`, `label`, `placeholder`, `name`, `test_id`, `anchor`, `anchor_kind`, `row_index`, `css`, `input_type`, `autocomplete`, `neighbors` e `relative_position`.
+
+`anchor_kind` diz como o dado se liga ao rótulo: `table_header`, `definition`, `label`, `inline` ou `adjacent`. `value_from_capture` só aceita uma captura de valor feita antes do passo.
 
 ## Segurança
 
@@ -254,6 +281,10 @@ Um servidor que abre sites a pedido do usuário, usando senhas de terceiros, é 
 | Força bruta | Limite de tentativas por IP e por conta. O limite é por processo: com várias instâncias da API, cada uma conta as suas |
 | Sessão roubada | Trocar a senha invalida todos os tokens anteriores |
 | Foto maliciosa | A imagem é decodificada e regravada em 256x256. O arquivo enviado e os metadados, como a localização, não ficam guardados |
+| Token da extensão vazar | Dura 2 horas e só envia gravações: não lê tarefas, conta nem acessos, e não gera outro token |
+| Extensão gravar o que não devia | Só age nas abas iniciadas pelo painel e nas janelas abertas por elas. O valor de senha, cartão e código nunca é lido, e eventos falsos criados pela página são ignorados |
+| Página mexer na gravação | A barra fica em um shadow DOM fechado e só aceita clique real. O texto do site nunca vira HTML, e fora do painel não existe ponte com a extensão |
+| Dado capturado virar ataque | Fórmulas são neutralizadas no Excel e no CSV. O dado capturado usado em um passo seguinte é só texto |
 
 ## Onde cada coisa fica
 
@@ -310,15 +341,20 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 | `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | IA, por API compatível com OpenAI. Sem chave, a camada 3 é pulada | Não |
 | `BREVO_API_KEY`, `EMAIL_FROM`, `PANEL_URL` | Alertas por e-mail. Sem chave, o aviso fica só no painel | Não |
 | `STORAGE_DIR` | Onde ficam os arquivos gerados. Em produção, precisa ser um volume | Não |
+| `BROWSER_HEADLESS` | Use `false` para ver o navegador repetindo a tarefa no seu computador | Não |
 
 > Perder ou trocar `FERNET_KEYS` sem manter a chave antiga torna as senhas salvas ilegíveis.
 
 ## O que ainda falta
 
-- **Extensão do Chrome:** o gravador não existe. As gravações entram por JSON.
+- **Sessão na repetição:** cada linha começa em um navegador limpo, sem a sua sessão. Quem grava já logado vê um aviso na repetição e precisa gravar de novo, começando pelo login. Código por e-mail ou SMS e login pelo Google não passam.
+- **Grandes volumes:** o limite é de 500 linhas por execução, e cada execução roda uma linha de cada vez em um único worker. Ainda não foi medido com muitas execuções ao mesmo tempo.
+- **Repetir para cada linha de uma tabela do site:** a repetição só vem da planilha enviada. A tabela é capturada, mas ainda não dá para clicar em cada linha dela.
+- **Condições:** não há "se aparecer X, faça Y".
+- **Envio de arquivo para o site:** a extensão avisa que não grava esse passo.
 - **CAPTCHA e código de login:** no servidor, ninguém consegue interagir com a tela. Hoje a pessoa só pode tentar de novo ou pular a linha. Falta decidir entre transmitir a tela para o painel, reaproveitar uma sessão salva ou rodar um executor local.
 - **Armazenamento:** os arquivos ficam em disco. Em produção, precisa de um volume ou de um bucket.
 - **Recuperação de senha e confirmação de e-mail:** ainda não existem.
-- **Iframes:** a camada de reparo só olha a página principal.
+- **Iframes:** gravar, repetir e capturar funcionam dentro deles, mas as camadas 2 e 3 de reparo só olham a página principal.
 - **Deploy:** não há Dockerfile ainda, e o proxy não substitui bloquear a saída para a rede interna no próprio ambiente.
 - **Benchmark:** os pesos e o limiar da camada 2 são valores iniciais, sem calibração com sites reais.

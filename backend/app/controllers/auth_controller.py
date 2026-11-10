@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, status
 
 from app.controllers.dependencies import UNAUTHORIZED_RESPONSE, CurrentUser, DbSession
 from app.core.rate_limit import limit_requests
+from app.core.security import create_recording_token
 from app.schemas.auth import (
     GoogleLoginRequest,
     LoginRequest,
+    RecordingTokenResponse,
     RegisterRequest,
     TokenResponse,
     UserResponse,
@@ -77,3 +79,20 @@ def login_with_google(payload: GoogleLoginRequest, session: DbSession) -> TokenR
 )
 def me(user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(user)
+
+
+@router.post(
+    "/recording-token",
+    response_model=RecordingTokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Criar o token da extensão",
+    description=(
+        "Gera um token de curta duração para a extensão enviar uma gravação. "
+        "Ele não dá acesso a nenhuma outra rota."
+    ),
+    responses={**UNAUTHORIZED_RESPONSE, **_RATE_LIMIT_RESPONSE},
+    dependencies=[Depends(limit_requests(30))],
+)
+def create_recording_session(user: CurrentUser) -> RecordingTokenResponse:
+    token, expires_at = create_recording_token(user.id)
+    return RecordingTokenResponse(token=token, expires_at=expires_at)

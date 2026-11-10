@@ -9,6 +9,7 @@ import ipaddress
 import logging
 import select
 import socket
+import sys
 import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -145,11 +146,20 @@ class _Handler(BaseHTTPRequestHandler):
     do_OPTIONS = _forward_http
 
 
+class _ProxyServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # O navegador fecha ao fim de cada linha e derruba o que estava aberto: isso é o normal.
+        # Qualquer outro erro é defeito. O padrão imprimiria no terminal, fora do log.
+        if not isinstance(sys.exc_info()[1], OSError):
+            logger.exception("Erro inesperado no proxy de saída.")
+
+
 class EgressProxy:
     def __init__(self, policy: Policy = default_policy) -> None:
         handler = type("EgressHandler", (_Handler,), {"policy": staticmethod(policy)})
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self._server.daemon_threads = True
+        self._server = _ProxyServer(("127.0.0.1", 0), handler)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 

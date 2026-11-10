@@ -1,28 +1,45 @@
 """Executa um passo subindo a escada de reparo, da opção mais barata para a mais cara."""
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from playwright.sync_api import Download, Locator, Page
+from playwright.sync_api import Download, Locator, Page, Request
 from playwright.sync_api import Error as PlaywrightError
 
 from app.core.config import settings
-from app.models.enums import HelpKind, StepAction
+from app.models.enums import CaptureKind, HelpKind, StepAction
+from app.services.engine import capture, matcher, postcondition
 from app.services.engine import locator as layer_one
-from app.services.engine import matcher, postcondition
 from app.services.engine.browser import host_matches
 from app.services.engine.llm_repair import LlmRepairer
 from app.services.engine.safety import looks_irreversible
-from app.services.engine.snapshot import PageElement, has_captcha, locator_for, take_snapshot
+from app.services.engine.snapshot import (
+    PageElement,
+    has_captcha,
+    has_login_form,
+    locator_for,
+    take_snapshot,
+)
 from app.services.llm_client import LlmUnavailableError
 from app.services.sanitizer import SecretLeakError
 
 MAX_LLM_ROUNDS = 3
 MAX_OPTIONS = 3
 _LOAD_WAIT_MS = 3000
+_POLL_MS = 150
+_PRELUDE_WAIT_MS = 1000
 _SELECT_BY_VALUE_WAIT_MS = 500
+_TYPING_DELAY_MS = 10
+_QUIET_SECONDS = 0.5
+_SETTLE_MAX_SECONDS = 4
+_TRACKED_REQUESTS = {"document", "xhr", "fetch"}
+_LOGIN_MESSAGE = (
+    "O site pediu login, e esta gravação não tem esse passo. A repetição começa sem a sua sessão: "
+    "saia da conta no navegador e grave a tarefa de novo, começando pelo login."
+)
 
 
 class _ValueNotAvailableError(Exception):
@@ -44,6 +61,9 @@ class StepPlan:
     targets: list[dict[str, Any]]
     allowed_domains: list[str]
     secrets: list[str] = field(default_factory=list)
+    capture_kind: CaptureKind | None = None
+    # A tarefa tem um login gravado: um formulário de senha na tela é esperado
+    has_recorded_login: bool = False
 
 
 @dataclass
@@ -58,6 +78,7 @@ class StepOutcome:
     message: str = ""
     options: list[dict[str, Any]] = field(default_factory=list)
     download: Download | None = None
+    captured: str | list[dict[str, str]] | None = None
 
 
 class StepRunner:
@@ -74,10 +95,32 @@ class StepRunner:
         self.consume_llm_call = consume_llm_call
         # Chamado antes de tocar em um passo sem volta, para a marca sobreviver a uma queda do worker
         self.before_irreversible = before_irreversible
+        # Um download pode começar em uma janela nova, aberta pelo próprio clique
+        self.downloads: list[Download] = []
+        # Pedidos em andamento: o site ainda pode estar buscando o que vai mostrar
+        self._pending_requests: set[Request] = set()
+        page.context.on("request", self._on_request)
+        page.context.on("requestfinished", self._on_request_done)
+        page.context.on("requestfailed", self._on_request_done)
+        for open_page in page.context.pages:
+            self._watch_downloads(open_page)
+        page.context.on("page", self._watch_downloads)
+
+    def _on_request(self, request: Request) -> None:
+        if request.resource_type in _TRACKED_REQUESTS:
+            self._pending_requests.add(request)
+
+    def _on_request_done(self, request: Request) -> None:
+        self._pending_requests.discard(request)
+
+    def _watch_downloads(self, page: Page) -> None:
+        page.on("download", lambda download: self.downloads.append(download))
 
     def run(self, plan: StepPlan) -> StepOutcome:
         if plan.action == StepAction.NAVIGATE:
             return self._navigate(plan)
+        if plan.action == StepAction.CAPTURE:
+            return self._capture(plan)
         try:
             return self._climb_repair_ladder(plan)
         except _ValueNotAvailableError:
@@ -118,6 +161,35 @@ class StepRunner:
 
         return self._ask_human(plan, candidates)
 
+    def _capture(self, plan: StepPlan) -> StepOutcome:
+        """Lê o dado. Sem camadas 2 e 3: um valor parecido com o certo é só um dado errado."""
+        # Um valor antigo na tela é pior do que nenhum: o site precisa ter terminado de responder
+        self._settle()
+        read = capture.read_table if plan.capture_kind == CaptureKind.TABLE else capture.read_value
+        deadline = time.monotonic() + settings.element_wait_ms / 1000
+        while True:
+            for target in plan.targets:
+                captured = read(self.page, target)
+                if captured is not None:
+                    return StepOutcome("ok", layer=1, captured=captured)
+            if time.monotonic() >= deadline:
+                break
+            self.page.wait_for_timeout(_POLL_MS)
+
+        if has_captcha(self.page):
+            return StepOutcome(
+                "needs_human",
+                help_kind=HelpKind.CAPTCHA,
+                message="O portal pediu um CAPTCHA, e o Ditto não tenta contornar.",
+            )
+        if self._blocked_by_login(plan):
+            return StepOutcome("needs_human", help_kind=HelpKind.UNCERTAIN, message=_LOGIN_MESSAGE)
+        return StepOutcome(
+            "needs_human",
+            help_kind=HelpKind.UNCERTAIN,
+            message=f"Não encontrei o dado desta captura na página: {plan.intent}.",
+        )
+
     def _navigate(self, plan: StepPlan) -> StepOutcome:
         host = (urlsplit(plan.url or "").hostname or "").lower()
         if not host_matches(host, plan.allowed_domains):
@@ -131,6 +203,7 @@ class StepRunner:
             self.page.goto(plan.url, wait_until="domcontentloaded")
         except PlaywrightError:
             return StepOutcome("failed", message="O portal não abriu ou o endereço foi bloqueado.")
+        self._settle()
 
         # Um redirecionamento pode ter levado para fora dos domínios da tarefa
         final_host = (urlsplit(self.page.url).hostname or "").lower()
@@ -152,22 +225,36 @@ class StepRunner:
         return StepOutcome("failed", message="A página abriu, mas não ficou como o esperado.")
 
     def _layer_one(self, plan: StepPlan) -> StepOutcome | None:
-        for index, target in enumerate(plan.targets):
-            element = self._locate_with_prelude(target)
-            if element is None:
-                continue
+        """Espera o elemento aparecer antes de concluir que o site mudou: página lenta não é reparo."""
+        tried: set[int] = set()
+        deadline = time.monotonic() + settings.element_wait_ms / 1000
+        first_pass = True
 
-            passed, download = self._perform(element, plan)
-            if passed:
-                return StepOutcome("ok", layer=1, target_index=index, download=download)
+        while True:
+            for index, target in enumerate(plan.targets):
+                # Caminhos com menu abrem coisas na tela: só tentam uma vez
+                if index in tried or (target.get("prelude") and not first_pass):
+                    continue
+                element = self._locate_with_prelude(target)
+                if element is None:
+                    continue
 
-            # Já tocou no botão: não pode tentar de novo em um passo sem volta
-            if plan.irreversible:
-                return StepOutcome(
-                    "failed",
-                    message=f"Um passo sem volta foi acionado, mas não deu o resultado esperado: {plan.intent}. Confira no portal.",
-                )
-        return None
+                tried.add(index)
+                passed, download = self._perform(element, plan)
+                if passed:
+                    return StepOutcome("ok", layer=1, target_index=index, download=download)
+
+                # Já tocou no botão: não pode tentar de novo em um passo sem volta
+                if plan.irreversible:
+                    return StepOutcome(
+                        "failed",
+                        message=f"Um passo sem volta foi acionado, mas não deu o resultado esperado: {plan.intent}. Confira no portal.",
+                    )
+
+            first_pass = False
+            if len(tried) == len(plan.targets) or time.monotonic() >= deadline:
+                return None
+            self.page.wait_for_timeout(_POLL_MS)
 
     def _layer_two(self, plan: StepPlan, candidates: list[matcher.Candidate]) -> StepOutcome | None:
         confident = matcher.is_confident(
@@ -244,7 +331,12 @@ class StepRunner:
         recorded = f"{plan.targets[0].get('text', '')} {plan.intent}"
         return looks_irreversible(chosen) and not looks_irreversible(recorded)
 
+    def _blocked_by_login(self, plan: StepPlan) -> bool:
+        return not plan.has_recorded_login and has_login_form(self.page)
+
     def _ask_human(self, plan: StepPlan, candidates: list[matcher.Candidate]) -> StepOutcome:
+        if self._blocked_by_login(plan):
+            return StepOutcome("needs_human", help_kind=HelpKind.UNCERTAIN, message=_LOGIN_MESSAGE)
         options = [
             {
                 "id": str(candidate.element.index),
@@ -276,7 +368,12 @@ class StepRunner:
             element = layer_one.locate(self.page, step_before)
             if element is None or not self._click(element):
                 return None
-        return layer_one.locate(self.page, target)
+        element = layer_one.locate(self.page, target)
+        # Um menu que acabou de abrir pode levar um instante para mostrar a opção
+        if element is None and target.get("prelude"):
+            self.page.wait_for_timeout(_PRELUDE_WAIT_MS)
+            element = layer_one.locate(self.page, target)
+        return element
 
     def _click(self, element: Locator) -> bool:
         try:
@@ -287,8 +384,20 @@ class StepRunner:
             return False
 
     def _settle(self) -> None:
+        """Espera a página parar de mudar. Um site com animação sem fim só custa o tempo máximo."""
         try:
             self.page.wait_for_load_state("domcontentloaded", timeout=_LOAD_WAIT_MS)
+            deadline = time.monotonic() + _SETTLE_MAX_SECONDS
+            state = postcondition.capture_state(self.page).fingerprint
+            quiet_since = time.monotonic()
+            while time.monotonic() < deadline:
+                self.page.wait_for_timeout(_POLL_MS)
+                current = postcondition.capture_state(self.page).fingerprint
+                if current != state or self._pending_requests:
+                    state = current
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= _QUIET_SECONDS:
+                    return
         except PlaywrightError:
             pass  # a pós-condição é quem decide se o passo deu certo
 
@@ -296,13 +405,23 @@ class StepRunner:
         if plan.action == StepAction.CLICK:
             element.click()
         elif plan.action == StepAction.FILL:
-            element.fill(plan.value or "")
+            self._fill(element, plan.value or "")
         elif plan.action == StepAction.SELECT:
             self._select(element, plan.value or "")
         elif plan.action == StepAction.CHECK:
             element.check()
         elif plan.action == StepAction.PRESS:
             element.press(plan.value or "Enter")
+
+    def _fill(self, element: Locator, value: str) -> None:
+        if not element.evaluate("el => el.isContentEditable"):
+            element.fill(value)
+            return
+        # Editores de texto só entendem teclas: é assim que criam cada linha
+        element.click()
+        self.page.keyboard.press("ControlOrMeta+A")
+        self.page.keyboard.press("Delete")
+        self.page.keyboard.type(value, delay=_TYPING_DELAY_MS)
 
     def _select(self, element: Locator, value: str) -> None:
         try:
@@ -323,6 +442,7 @@ class StepRunner:
             if plan.postcondition.get("type") == postcondition.DOWNLOAD:
                 return self._perform_download(element, plan)
 
+            filled = element.element_handle()
             self._act(element, plan)
             self._settle()
             passed = postcondition.check(
@@ -332,15 +452,22 @@ class StepRunner:
                 locator=element,
                 value=plan.value,
                 before=before,
+                filled=filled,
             )
             return passed, None
         except PlaywrightError:
             return False, None
 
     def _perform_download(self, element: Locator, plan: StepPlan) -> tuple[bool, Download | None]:
-        with self.page.expect_download(timeout=settings.postcondition_timeout_ms) as info:
-            self._act(element, plan)
-        download = info.value
+        self.downloads.clear()
+        self._act(element, plan)
+
+        deadline = time.monotonic() + settings.postcondition_timeout_ms / 1000
+        while not self.downloads and time.monotonic() < deadline:
+            self.page.wait_for_timeout(_POLL_MS)
+        if not self.downloads:
+            return False, None
+        download = self.downloads[0]
 
         extension = plan.postcondition.get("extension", "").lower().lstrip(".")
         if extension and not download.suggested_filename.lower().endswith(f".{extension}"):

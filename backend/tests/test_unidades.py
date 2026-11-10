@@ -1,6 +1,9 @@
 """Regras puras, sem banco nem navegador."""
 
 import io
+import socket
+import struct
+import time
 
 import pytest
 from openpyxl import Workbook
@@ -11,11 +14,37 @@ from app.models.enums import StepAction
 from app.services.batch import neutralize_cell, normalize_column, parse_rows
 from app.services.engine import matcher
 from app.services.engine.browser import host_matches, is_request_allowed
-from app.services.engine.egress_proxy import default_policy, is_public_address, resolve_allowed
+from app.services.engine.egress_proxy import (
+    EgressProxy,
+    default_policy,
+    is_public_address,
+    resolve_allowed,
+)
 from app.services.engine.safety import looks_irreversible
 from app.services.engine.snapshot import PageElement
 from app.services.sanitizer import SecretLeakError, build_repair_payload, scrub, value_shape
 from app.services.templating import render, safe_relative_path
+
+
+def test_navegador_fechando_a_conexao_nao_suja_o_terminal(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # O navegador fecha ao fim de cada linha, e as conexões abertas caem de forma abrupta
+    proxy = EgressProxy(lambda _host, _address: True)
+    with socket.create_server(("127.0.0.1", 0)) as destino:
+        porta = destino.getsockname()[1]
+        endereco_proxy = proxy.url.removeprefix("http://").split(":")
+        navegador = socket.create_connection((endereco_proxy[0], int(endereco_proxy[1])))
+        navegador.sendall(f"CONNECT 127.0.0.1:{porta} HTTP/1.1\r\n\r\n".encode())
+        assert b"200" in navegador.recv(1024)
+
+        # Fecha como quem cai: o outro lado recebe um erro, e não um fim de conexão normal
+        navegador.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        navegador.close()
+        time.sleep(0.5)
+    proxy.stop()
+
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def elemento(indice: int = 0, **campos) -> PageElement:

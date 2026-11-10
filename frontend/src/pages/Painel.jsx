@@ -6,7 +6,7 @@ import { useAuth } from '../features/auth/index.js'
 import { AtalhoConta, ContaPage } from '../features/conta/index.js'
 import { DashboardPage } from '../features/dashboard/index.js'
 import { ExecucaoDetalhePage, ExecucoesPage, NovaExecucaoPage } from '../features/execucoes/index.js'
-import { FluxoDetalhePage, FluxosPage, ImportarGravacao } from '../features/fluxos/index.js'
+import { FluxoDetalhePage, FluxosPage, GravarTarefa } from '../features/fluxos/index.js'
 import { ReparosPage, usePedidos } from '../features/reparos/index.js'
 
 function PaginaNaoEncontrada() {
@@ -29,7 +29,7 @@ function Painel() {
           <LayoutPainel
             pedidosPendentes={pedidos?.length ?? 0}
             perfil={<AtalhoConta />}
-            acaoPrincipal={<ImportarGravacao />}
+            acaoPrincipal={<GravarTarefa />}
             aoSair={sair}
           />
         }

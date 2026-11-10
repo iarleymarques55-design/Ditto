@@ -44,7 +44,7 @@ O Ditto não é feito para um site ou uma tarefa específica. Ele aprende **qual
 | **Consultar e conferir** | Status de pedidos, situação de CNPJs, saldo e vencimentos em vários portais, todo dia ou toda semana |
 | **Rotinas agendadas** | Tudo acima rodando sozinho no dia e horário certos, como "todo dia 5 às 07:10" |
 
-**O que o Ditto faz em cada passo:** clicar, digitar, escolher opções em listas, navegar entre páginas, esperar carregamentos, baixar arquivos e salvar com o nome e a pasta certos.
+**O que o Ditto faz em cada passo:** clicar, digitar, escolher opções em listas, navegar entre páginas, esperar carregamentos, baixar arquivos, salvar com o nome e a pasta certos e **ler dados da tela**. O que ele lê vai para um Excel, e pode ser digitado em outro sistema no mesmo fluxo.
 
 **Onde ele para e chama você:** CAPTCHA, ações que não têm volta (pagar, enviar, confirmar) e qualquer passo em que ele não tenha certeza do que fazer. Veja [Segurança e uso responsável](#-segurança-e-uso-responsável).
 
@@ -123,8 +123,8 @@ Quando um reparo funciona, o novo caminho é salvo. O LLM é chamado **uma vez**
 ### Extensão gravadora
 | Tecnologia | Uso no projeto |
 |---|---|
-| **Chrome Extension (Manifest V3)** | Captura de cliques, digitação, navegação e downloads |
-| **JavaScript** | Content script + service worker |
+| **Chrome Extension (Manifest V3)** | Grava cliques, digitação, navegação e downloads, e captura dados da tela |
+| **JavaScript** | Content script + service worker, sem etapa de build |
 
 ### Segurança
 | Tecnologia | Uso no projeto |
@@ -184,11 +184,10 @@ Ditto/
 │           ├── engine/        # navegador, proxy de saída e a escada de reparo
 │           └── ...
 ├── frontend/                  # Landing page e painel (React + Vite + Tailwind)
-│   └── src/features/          # auth, dashboard, fluxos, execucoes, reparos
+│   └── src/features/          # auth, conta, dashboard, fluxos, execucoes, reparos
+├── extension/                 # Gravador para o Chrome (veja extension/README.md)
 └── docs/
 ```
-
-A extensão do Chrome vai entrar em `extension/`.
 
 ---
 
@@ -238,18 +237,22 @@ npm install
 npm run dev                  # em http://localhost:5173
 ```
 
+Para gravar, carregue o gravador no Chrome: em `chrome://extensions`, ligue o **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta `extension/`.
+
 ---
 
 ## 🗺️ Roadmap
 
 - [x] **Landing page:** apresentação do produto com uma demo interativa do auto-reparo (simulada no navegador)
-- [ ] **Fase 1 – Gravador:** extensão captura cliques, digitação e navegação e exporta JSON. O backend já recebe a gravação; falta a extensão
+- [x] **Fase 1 – Gravador:** extensão do Chrome grava cliques, digitação, navegação e downloads, e captura dados da tela. Testada no Chrome, em sites públicos de demonstração; falta usar em portais de trabalho
 - [x] **Fase 2 – Replay:** executor Playwright com esperas inteligentes (sem `sleep`)
 - [x] **Fase 3 – Impressão digital:** múltiplos seletores e pontuação por similaridade
 - [x] **Fase 4 – IA:** intenções, pós-condições e auto-reparo com verificação. Testado contra o Groq no portal de teste; falta medir em sites reais
 - [x] **Fase 5 – Lote:** variáveis, entrada por CSV/Excel e agendamento
 - [x] **Fase 6 – Observabilidade:** painel com histórico, screenshots e taxa de reparo por camada
 - [ ] **Benchmark:** 100 variações de layout no site de teste, comparando com RPA tradicional
+- [ ] **Grandes volumes:** vários workers, lotes acima de 500 linhas e medição de carga
+- [ ] **Mais lógica no fluxo:** repetir para cada linha de uma tabela do site e seguir por condições
 
 ---
 

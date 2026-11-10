@@ -20,6 +20,7 @@ os.environ["ALLOW_PRIVATE_NETWORKS"] = "true"
 os.environ["STORAGE_DIR"] = tempfile.mkdtemp(prefix="ditto-testes-")
 os.environ["STEP_TIMEOUT_MS"] = "3000"
 os.environ["POSTCONDITION_TIMEOUT_MS"] = "1200"
+os.environ["ELEMENT_WAIT_MS"] = "400"
 
 import pytest  # noqa: E402
 from alembic.config import Config  # noqa: E402

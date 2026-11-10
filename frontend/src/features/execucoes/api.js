@@ -60,6 +60,8 @@ function mapearItem(item) {
     arquivo: item.file_name,
     arquivoId: item.file_artifact_id,
     telaId: item.screenshot_artifact_id,
+    dados: item.output,
+    linhasDeTabela: item.table_rows,
   }
 }
 
@@ -68,6 +70,12 @@ export function mapearExecucao(execucao) {
     ...mapearResumoExecucao(execucao),
     portal: execucao.portal,
     itens: execucao.items.map(mapearItem),
+    capturas: execucao.captures.map((captura) => ({
+      chave: captura.key,
+      rotulo: captura.label,
+      tipo: captura.kind === 'table' ? 'tabela' : 'valor',
+      colunas: captura.columns,
+    })),
     passos: execucao.steps.map((passo) => ({ posicao: passo.position, intencao: passo.intent })),
     log: execucao.log.map((linha) => ({
       id: linha.id,
@@ -105,6 +113,14 @@ export function baixarRelatorio(id) {
 
 export function exportarPlanilha(id) {
   return baixarArquivo(`/runs/${id}/export`, `execucao-${id}.csv`)
+}
+
+export function exportarExcel(id) {
+  return baixarArquivo(`/runs/${id}/export?format=xlsx`, `execucao-${id}.xlsx`)
+}
+
+export function obterDadosDaLinha(execucaoId, itemId) {
+  return pedir(`/runs/${execucaoId}/items/${itemId}/output`)
 }
 
 export function baixarArtefato(id, nome) {

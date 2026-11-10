@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError
-from app.models.enums import FlowStatus, StepAction, VariableStatus, VersionSource
+from app.models.enums import CaptureKind, FlowStatus, StepAction, VariableStatus, VersionSource
 from app.models.flow import Flow, Step, StepVersion, Variable
 from app.repositories.credential_repository import CredentialRepository
 from app.repositories.flow_repository import FlowRepository
@@ -23,7 +23,7 @@ from app.schemas.flow import (
 )
 from app.services import presenters
 from app.services.engine import postcondition
-from app.services.templating import safe_relative_path
+from app.services.templating import safe_relative_path, slugify
 
 _SENSITIVE_AUTOCOMPLETE = ("password", "cc-", "one-time-code")
 _USERNAME_TYPES = {"text", "email", "tel", None, ""}
@@ -58,11 +58,19 @@ def _build_step(steps: list[RecordedStep], index: int) -> Step:
     elif _is_username_field(steps, index):
         credential_field = "username"
 
+    value = None if credential_field else recorded.value
+    if recorded.value_from_capture and not credential_field:
+        value = f"{{{slugify(recorded.value_from_capture)}}}"
+
+    is_capture = recorded.action == StepAction.CAPTURE
     step = Step(
         position=index + 1,
         action=recorded.action,
         # O valor de campo sensível nunca é gravado
-        value_template=None if credential_field else recorded.value,
+        value_template=None if is_capture else value,
+        capture_key=slugify(recorded.capture_name) if is_capture else None,
+        capture_label=recorded.capture_name.strip() if is_capture else None,
+        capture_kind=(recorded.capture_kind or CaptureKind.VALUE) if is_capture else None,
         url_template=recorded.url,
         credential_field=credential_field,
         postcondition=(
@@ -79,7 +87,8 @@ def _build_step(steps: list[RecordedStep], index: int) -> Step:
 
 def _allowed_domains(payload: RecordingCreate) -> list[str]:
     urls = [payload.start_url, *(step.url for step in payload.steps if step.url)]
-    return sorted({(urlsplit(url).hostname or "").lower() for url in urls} - {""})
+    hosts = {(urlsplit(url).hostname or "").lower() for url in urls}
+    return sorted((hosts | set(payload.allowed_hosts)) - {""})
 
 
 class FlowService:

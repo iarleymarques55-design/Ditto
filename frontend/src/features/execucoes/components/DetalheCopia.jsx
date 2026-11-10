@@ -4,6 +4,7 @@ import { ROTULO_CAMADA } from '../../reparos/index.js'
 import { baixarArtefato } from '../api.js'
 import { SITUACOES_ITEM } from '../situacoes.js'
 import ScreenshotPasso from './ScreenshotPasso.jsx'
+import TabelaCapturada from './TabelaCapturada.jsx'
 
 function resultadoDoPasso(item, posicao) {
   const problema = item.passoProblema
@@ -19,7 +20,7 @@ function resultadoDoPasso(item, posicao) {
 }
 
 // O que aconteceu em uma linha da planilha, passo a passo.
-function DetalheCopia({ item, passos }) {
+function DetalheCopia({ execucaoId, item, passos, capturas }) {
   const semPassos = item.situacao === 'pendente' || item.situacao === 'rodando'
 
   return (
@@ -37,6 +38,18 @@ function DetalheCopia({ item, passos }) {
           Baixar {item.arquivo}
         </Botao>
       )}
+
+      {capturas
+        .filter((captura) => captura.tipo === 'tabela' && item.linhasDeTabela[captura.chave] !== undefined)
+        .map((captura) => (
+          <TabelaCapturada
+            key={`${item.id}-${captura.chave}`}
+            execucaoId={execucaoId}
+            itemId={item.id}
+            captura={captura}
+            linhas={item.linhasDeTabela[captura.chave]}
+          />
+        ))}
 
       {semPassos ? (
         <p className="mt-4 font-hand text-[24px] font-bold text-ink">

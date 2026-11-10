@@ -6,7 +6,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IdTimestampMixin, enum_column
-from app.models.enums import FlowStatus, StepAction, VariableSource, VariableStatus, VersionSource
+from app.models.enums import (
+    CaptureKind,
+    FlowStatus,
+    StepAction,
+    VariableSource,
+    VariableStatus,
+    VersionSource,
+)
 
 
 class Flow(IdTimestampMixin, Base):
@@ -49,6 +56,10 @@ class Step(IdTimestampMixin, Base):
     irreversible: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False)
     save_as: Mapped[str | None] = mapped_column(Text)
+    # Em passos de captura: a chave na saída e em {chave}, e o nome que a pessoa deu
+    capture_key: Mapped[str | None] = mapped_column(String(64))
+    capture_label: Mapped[str | None] = mapped_column(String(120))
+    capture_kind: Mapped[CaptureKind | None] = mapped_column(enum_column(CaptureKind))
 
     flow: Mapped[Flow] = relationship(back_populates="steps")
     versions: Mapped[list["StepVersion"]] = relationship(

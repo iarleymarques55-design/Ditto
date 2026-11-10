@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -57,6 +58,8 @@ class RunItem(IdTimestampMixin, Base):
     position: Mapped[int] = mapped_column(Integer)
     label: Mapped[str] = mapped_column(String(200))
     input: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    # O que foi capturado da tela: {chave: texto} ou, em tabelas, {chave: [linhas]}
+    output: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
     status: Mapped[ItemStatus] = mapped_column(
         enum_column(ItemStatus), default=ItemStatus.PENDING, index=True
     )

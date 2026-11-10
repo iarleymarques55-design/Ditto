@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from app.models.enums import ArtifactKind, VersionSource
+from app.models.enums import ArtifactKind, CaptureKind, VersionSource
 from app.models.flow import Flow, Step, StepVersion
 from app.models.repair import HelpRequest, Repair
 from app.models.run import Run, RunItem, RunLogEntry
@@ -12,8 +12,9 @@ from app.models.schedule import Schedule
 from app.repositories.run_repository import RunCounts
 from app.schemas.flow import StepResponse
 from app.schemas.repair import HelpOption, HelpRequestResponse, RepairResponse
-from app.schemas.run import RunDetail, RunItemResponse, RunLogLine, RunStep, RunSummary
+from app.schemas.run import RunCapture, RunDetail, RunItemResponse, RunLogLine, RunStep, RunSummary
 from app.schemas.schedule import ScheduleResponse
+from app.services.templating import is_placeholder
 
 _PATH_SEPARATOR = " › "
 
@@ -28,7 +29,7 @@ def current_target(step: Step) -> dict[str, Any]:
 
 
 def _target_name(target: dict[str, Any]) -> str:
-    for key in ("text", "label", "placeholder", "name", "css"):
+    for key in ("text", "label", "anchor", "placeholder", "name", "css"):
         if target.get(key):
             return str(target[key])
     return ""
@@ -59,6 +60,14 @@ def step_response(step: Step) -> StepResponse:
         irreversible=step.irreversible,
         auto_confirm=step.auto_confirm,
         save_as=step.save_as,
+        filled_from_capture=(
+            step.value_template.strip("{}")
+            if step.value_template and is_placeholder(step.value_template)
+            else None
+        ),
+        capture_key=step.capture_key,
+        capture_label=step.capture_label,
+        capture_kind=step.capture_kind,
         repaired_at=version.created_at if repaired else None,
         current_path=describe_target(version.target) if version else (step.url_template or ""),
     )
@@ -101,12 +110,17 @@ def run_summary(run: Run, counts: RunCounts | None) -> RunSummary:
 
 
 def _item_response(item: RunItem) -> RunItemResponse:
+    # Tabelas podem ser grandes e a tela consulta esta resposta o tempo todo: aqui só a contagem
+    values = {k: v for k, v in (item.output or {}).items() if isinstance(v, str)}
+    tables = {k: len(v) for k, v in (item.output or {}).items() if isinstance(v, list)}
     file = next((a for a in reversed(item.artifacts) if a.kind == ArtifactKind.FILE), None)
     screenshot = next(
         (a for a in reversed(item.artifacts) if a.kind == ArtifactKind.SCREENSHOT), None
     )
     return RunItemResponse(
         id=item.id,
+        output=values,
+        table_rows=tables,
         position=item.position,
         label=item.label,
         status=item.status,
@@ -124,6 +138,20 @@ def run_detail(run: Run, counts: RunCounts | None, log: list[RunLogEntry]) -> Ru
     return RunDetail(
         **run_summary(run, counts).model_dump(),
         portal=portal_of(run.flow),
+        captures=[
+            RunCapture(
+                key=step.capture_key,
+                label=step.capture_label,
+                kind=step.capture_kind,
+                columns=(
+                    current_target(step).get("neighbors", [])
+                    if step.capture_kind == CaptureKind.TABLE
+                    else []
+                ),
+            )
+            for step in run.flow.steps
+            if step.capture_key
+        ],
         items=[_item_response(item) for item in run.items],
         log=[RunLogLine.model_validate(entry) for entry in log],
         steps=[RunStep(position=step.position, intent=step.intent) for step in run.flow.steps],

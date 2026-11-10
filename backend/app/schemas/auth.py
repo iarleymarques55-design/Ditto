@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, StringConstraints
@@ -79,6 +80,11 @@ class UserResponse(BaseModel):
     has_password: bool = Field(description="`false` em conta que só entra pelo Google.")
     avatar_id: str | None = Field(description="Muda a cada foto nova. Nulo quando não há foto.")
     email_alerts: bool = Field(description="`true` para receber alertas por e-mail.")
+
+
+class RecordingTokenResponse(BaseModel):
+    token: str = Field(description="Token da extensão. Só serve para enviar uma gravação.")
+    expires_at: datetime = Field(description="Quando o token deixa de valer.")
 
 
 class TokenResponse(BaseModel):

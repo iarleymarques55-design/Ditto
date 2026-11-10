@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Ditto: gravador de tarefas",
+  "version": "1.0.0",
+  "description": "Grava uma tarefa feita no navegador para o Ditto repetir. Só grava as abas que você iniciou pelo painel.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "scripting", "tabs", "webNavigation", "downloads"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Ditto: gravador",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+  },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:5173/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

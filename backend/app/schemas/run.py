@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ItemStatus, LogLevel, RunStatus, RunTrigger
+from app.models.enums import CaptureKind, ItemStatus, LogLevel, RunStatus, RunTrigger
 
 
 class RunSummary(BaseModel):
@@ -45,6 +45,8 @@ class RunSummary(BaseModel):
 
 
 class RunItemResponse(BaseModel):
+    output: dict[str, str] = Field(description="Valores capturados da tela nesta linha.")
+    table_rows: dict[str, int] = Field(description="Quantas linhas cada tabela capturada trouxe.")
     id: uuid.UUID = Field(description="Identificador da linha.")
     position: int = Field(description="Posição da linha na planilha.")
     label: str = Field(description="Nome da linha, vindo da primeira coluna.")
@@ -58,6 +60,13 @@ class RunItemResponse(BaseModel):
     screenshot_artifact_id: uuid.UUID | None = Field(
         description="Imagem da tela no momento do problema."
     )
+
+
+class RunCapture(BaseModel):
+    key: str = Field(description="Chave do dado em `output`.")
+    label: str = Field(description="Nome do dado.")
+    kind: CaptureKind = Field(description="`value` ou `table`.")
+    columns: list[str] = Field(description="Em tabelas: as colunas, na ordem do site.")
 
 
 class RunLogLine(BaseModel):
@@ -74,6 +83,7 @@ class RunStep(BaseModel):
 
 
 class RunDetail(RunSummary):
+    captures: list[RunCapture] = Field(description="Dados que esta tarefa captura da tela.")
     portal: str = Field(description="Domínio principal da tarefa.")
     items: list[RunItemResponse] = Field(description="Linhas, em ordem.")
     log: list[RunLogLine] = Field(description="Últimas linhas do registro.")

@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from zoneinfo import ZoneInfo
@@ -9,6 +10,17 @@ from app.models.flow import Variable
 
 _PLACEHOLDER = re.compile(r"\{([a-z0-9_]+)\}")
 _UNSAFE_CHARS = re.compile(r"[^\w .-]+", re.UNICODE)
+
+
+def slugify(text: str, fallback: str = "campo") -> str:
+    """Vira um nome usável em {chave}: "Situação do CNPJ" fica situacao_do_cnpj."""
+    decomposed = unicodedata.normalize("NFD", text.lower())
+    ascii_only = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "_", ascii_only).strip("_")[:40] or fallback
+
+
+def is_placeholder(template: str) -> bool:
+    return bool(_PLACEHOLDER.fullmatch(template))
 
 
 def render(template: str, values: dict[str, str]) -> str:

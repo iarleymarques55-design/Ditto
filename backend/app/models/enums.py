@@ -16,6 +16,12 @@ class StepAction(StrEnum):
     SELECT = "select"
     CHECK = "check"
     PRESS = "press"
+    CAPTURE = "capture"
+
+
+class CaptureKind(StrEnum):
+    VALUE = "value"
+    TABLE = "table"
 
 
 class VersionSource(StrEnum):
