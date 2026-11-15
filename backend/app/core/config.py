@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr = Field(min_length=32)
     jwt_expires_minutes: int = 480
     recording_token_minutes: int = 120
+    runner_token_days: int = 30
     # Separadas por vírgula, da mais nova para a mais antiga
     fernet_keys: SecretStr
 
@@ -57,15 +58,26 @@ class Settings(BaseSettings):
     postcondition_timeout_ms: int = 8000
     browser_channel: str | None = None
     browser_headless: bool = True
+    # Porta em que o worker espera a extensão para rodar as tarefas no Chrome da pessoa.
+    # Vazio: o worker abre um navegador próprio
+    extension_runner_port: int | None = None
     # Só para os testes com o portal local: em produção o worker nunca acessa a rede interna
     allow_private_networks: bool = False
 
     worker_poll_seconds: float = 2.0
 
+    @field_validator("extension_runner_port", mode="before")
+    @classmethod
+    def _empty_port_is_off(cls, value: object) -> object:
+        # No .env, "EXTENSION_RUNNER_PORT=" vazio quer dizer desligado
+        return None if value == "" else value
+
     @model_validator(mode="after")
     def _block_unsafe_production(self) -> Self:
         if self.environment == "production" and self.allow_private_networks:
             raise ValueError("ALLOW_PRIVATE_NETWORKS não pode ficar ligado em produção.")
+        if self.environment == "production" and self.extension_runner_port:
+            raise ValueError("EXTENSION_RUNNER_PORT é só para rodar no próprio computador.")
         return self
 
     @property

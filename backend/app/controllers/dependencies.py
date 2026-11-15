@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.exceptions import UnauthorizedError
+from app.core.security import RECORDING_SCOPE
 from app.models.user import User
 from app.schemas.error import ErrorResponse
 from app.services.auth_service import AuthService
@@ -44,7 +45,9 @@ def get_recording_user(
     """Aceita também o token da extensão, que não vale em nenhuma outra rota."""
     if credentials is None:
         raise UnauthorizedError
-    return AuthService(session).get_user_from_token(credentials.credentials, allow_recording=True)
+    return AuthService(session).get_user_from_token(
+        credentials.credentials, allowed_scope=RECORDING_SCOPE
+    )
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]

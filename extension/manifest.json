@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "Ditto: gravador de tarefas",
   "version": "1.0.0",
-  "description": "Grava uma tarefa feita no navegador para o Ditto repetir. Só grava as abas que você iniciou pelo painel.",
+  "description": "Grava uma tarefa feita no navegador e roda as repetições neste Chrome, em abas abertas pelo Ditto.",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "scripting", "tabs", "webNavigation", "downloads"],
+  "permissions": ["storage", "scripting", "tabs", "webNavigation", "downloads", "debugger", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": {

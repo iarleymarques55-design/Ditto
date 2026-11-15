@@ -1,0 +1,102 @@
+import { useCallback, useEffect, useState } from 'react'
+import Botao from '../../../components/ui/Botao.jsx'
+import { ligarExecutor, statusDoExecutor } from '../../fluxos/extensao.js'
+import { classeTitulo } from './campos.js'
+
+const ESPERA_CONEXAO_MS = 1200
+const TENTATIVAS_APOS_LIGAR = 5
+
+const ESTADOS = {
+  conectado: { marcador: 'bg-ok-texto', texto: 'Ligado. A próxima execução abre uma aba ao lado da sua.' },
+  conectando: {
+    marcador: 'bg-sinal',
+    texto: 'Ligado, esperando o worker. Confira se ele está no ar com EXTENSION_RUNNER_PORT=8765 no .env.',
+  },
+  desconectado: {
+    marcador: 'bg-sinal',
+    texto: 'Ligado, esperando o worker. Confira se ele está no ar com EXTENSION_RUNNER_PORT=8765 no .env.',
+  },
+  recusado: { marcador: 'bg-grafite', texto: 'Desligado: a ligação expirou. Ligue de novo.' },
+  'sem-token': { marcador: 'bg-grafite', texto: 'Desligado. As tarefas rodam no navegador do worker, sem as suas contas.' },
+  'sem-resposta': { marcador: 'bg-grafite', texto: 'A extensão não respondeu. Recarregue a página.' },
+  'sem-extensao': {
+    marcador: 'bg-grafite',
+    texto: 'A extensão do Ditto não está instalada neste Chrome. Instale e recarregue a página.',
+  },
+}
+
+const esperar = (ms) => new Promise((resolver) => setTimeout(resolver, ms))
+
+function ExecutorConta() {
+  const [status, setStatus] = useState(null)
+  const [ligando, setLigando] = useState(false)
+  const [erro, setErro] = useState(null)
+
+  const atualizar = useCallback(async () => setStatus(await statusDoExecutor()), [])
+
+  useEffect(() => {
+    // A extensão marca a página logo ao carregar; o primeiro estado chega numa volta só
+    let ativo = true
+    statusDoExecutor().then((atual) => ativo && setStatus(atual))
+    window.addEventListener('focus', atualizar)
+    return () => {
+      ativo = false
+      window.removeEventListener('focus', atualizar)
+    }
+  }, [atualizar])
+
+  async function ligar() {
+    setLigando(true)
+    setErro(null)
+    try {
+      let atual = await ligarExecutor()
+      // A conexão com o worker leva um instante depois que o token chega
+      for (let tentativa = 0; atual !== 'conectado' && tentativa < TENTATIVAS_APOS_LIGAR; tentativa += 1) {
+        await esperar(ESPERA_CONEXAO_MS)
+        atual = await statusDoExecutor()
+      }
+      setStatus(atual)
+    } catch (falha) {
+      setErro(falha.message)
+    } finally {
+      setLigando(false)
+    }
+  }
+
+  const estado = ESTADOS[status]
+  const podeLigar = status && !['sem-extensao', 'sem-resposta'].includes(status)
+  const desligado = ['sem-token', 'recusado'].includes(status)
+
+  return (
+    <section aria-labelledby="executor-titulo">
+      <h2 id="executor-titulo" className={classeTitulo}>
+        Executar no meu Chrome
+      </h2>
+      <p className="mt-1 max-w-[56ch] text-[14.5px]">
+        As tarefas da sua conta rodam neste Chrome, em uma aba ao lado da que você está usando e com as contas que já estão logadas nele.
+      </p>
+
+      <p className="mt-4 flex max-w-[56ch] items-start gap-3 text-[15px] text-navy" aria-live="polite">
+        <span aria-hidden="true" className={`mt-[7px] size-2.5 shrink-0 rounded-full ring-4 ring-tinta-clara ${estado?.marcador ?? 'bg-tinta-media'}`} />
+        <span>{estado?.texto ?? 'Consultando a extensão...'}</span>
+      </p>
+
+      {podeLigar && (
+        <Botao variante={desligado ? 'primario' : 'discreto'} className="mt-3" disabled={ligando} onClick={ligar}>
+          {ligando ? 'Ligando...' : desligado ? 'Ligar neste Chrome' : 'Ligar de novo'}
+        </Botao>
+      )}
+      {erro && (
+        <p role="alert" className="mt-2 text-[14px] font-medium text-rec-texto">
+          {erro}
+        </p>
+      )}
+
+      <p className="mt-3 max-w-[56ch] text-[13.5px] text-grafite">
+        Enquanto uma tarefa roda, o Chrome mostra a faixa “começou a depurar este navegador”. Clicar em Cancelar nela para a linha que estava rodando.
+      </p>
+    </section>
+  )
+}
+
+export default ExecutorConta

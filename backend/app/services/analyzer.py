@@ -74,6 +74,10 @@ def _default_postcondition(step: Step) -> dict[str, Any]:
     return {"type": postcondition.PAGE_CHANGED}
 
 
+def _is_spreadsheet_step(step: Step) -> bool:
+    return bool(current_target(step).get("spreadsheet"))
+
+
 def _variable_name(label: str, used: set[str], position: int) -> str:
     base = slugify(label, f"campo_{position}")
     name = base
@@ -99,6 +103,9 @@ def _suggest_variables(flow: Flow) -> None:
     for step in flow.steps:
         is_input = step.action in {StepAction.FILL, StepAction.SELECT}
         if not is_input or step.credential_field or not step.value_template:
+            continue
+        # Célula de planilha é texto fixo: uma tabela de 72 células não vira 72 perguntas
+        if _is_spreadsheet_step(step):
             continue
         # O valor vem de um dado capturado antes: não há o que perguntar
         if is_placeholder(step.value_template):
@@ -127,6 +134,7 @@ def _enrich_with_llm(flow: Flow, client: LlmClient) -> None:
             "value": step.value_template,
         }
         for step in flow.steps
+        if not _is_spreadsheet_step(step)
     ]
     try:
         payload = build_analysis_payload(steps_data, secrets=[])
@@ -142,6 +150,8 @@ def _enrich_with_llm(flow: Flow, client: LlmClient) -> None:
             continue
         # Abrir uma página ou ler um dado: o nome gravado já diz tudo, e nada muda no site
         if step.action in {StepAction.NAVIGATE, StepAction.CAPTURE}:
+            continue
+        if _is_spreadsheet_step(step):
             continue
         step.intent = item.intencao
         # A IA pode pedir mais cautela, nunca menos

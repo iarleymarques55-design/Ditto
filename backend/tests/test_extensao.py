@@ -2,15 +2,21 @@
 
 import json
 import shutil
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from playwright.sync_api import BrowserContext, Page, Playwright, expect
+from fastapi.testclient import TestClient
+from playwright.sync_api import Browser, BrowserContext, Page, Playwright, expect
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import BACKEND_DIR
+from app.models.flow import Flow
 from app.schemas.flow import RecordingCreate
+from app.services.analyzer import analyze_flow
+from app.services.worker_tasks import process_next_run
 from tests.fixtures.portal import Portal
 
 ORIGEM_EXTENSAO = Path(BACKEND_DIR).parent / "extension"
@@ -109,18 +115,25 @@ def parar_e_pegar_gravacao(aba: Page, portal: Portal) -> dict[str, Any]:
     return gravacao
 
 
-def capturar(aba: Page, seletor: str, nome: str | None = None, tabela: bool = False) -> None:
-    barra(aba).get_by_role("button", name="Capturar dado").click()
-    barra(aba).get_by_text("Clique no dado").wait_for()
+def passos_da_pessoa(gravacao: dict[str, Any]) -> list[dict[str, Any]]:
+    """Sem os dados que a extensão guarda sozinha da tela final ao salvar."""
+    return [passo for passo in gravacao["steps"] if not passo.get("optional")]
+
+
+def comecar_captura(aba: Page) -> None:
+    barra(aba).get_by_role("button", name="Capturar dados").click()
+    barra(aba).get_by_text("Clique em cada dado").wait_for()
+
+
+def terminar_captura(aba: Page) -> None:
+    barra(aba).get_by_role("button", name="Pronto").click()
+    barra(aba).get_by_role("button", name="Capturar dados").wait_for()
+
+
+def capturar(aba: Page, seletor: str, nome_esperado: str = "Dados:") -> None:
+    """Um clique por dado: ele já fica salvo, com o nome do rótulo ao lado."""
     aba.locator(seletor).first.click()
-    campo = barra(aba).locator("input[type=text]")
-    campo.wait_for()
-    if nome:
-        campo.fill(nome)
-    if tabela:
-        barra(aba).get_by_label("A tabela inteira").check()
-    barra(aba).get_by_role("button", name="Salvar", exact=True).click()
-    barra(aba).get_by_role("button", name="Capturar dado").wait_for()
+    expect(barra(aba).locator(".ultimo").last).to_contain_text(nome_esperado)
 
 
 def test_painel_detecta_a_extensao(navegador_com_extensao: BrowserContext, portal: Portal) -> None:
@@ -142,17 +155,25 @@ def test_grava_digitacao_clique_e_captura(
     aba.wait_for_url("**/consulta?cnpj=111")
     barra(aba).wait_for()
 
-    capturar(aba, "dd")
+    # Um toque em "Capturar dados" e um clique em cada dado: nada de nome nem "Salvar"
+    comecar_captura(aba)
+    capturar(aba, "dd", "Situação")
     capturar(aba, "text=Razão social", "Razão social")
-    capturar(aba, "td >> nth=3", "Valor da nota")
-    capturar(aba, "td >> nth=0", "Notas", tabela=True)
+    capturar(aba, "td >> nth=3", "Valor")
+    # Clicar no cabeçalho guarda a tabela inteira
+    capturar(aba, "th >> nth=0", "Tabela")
+    terminar_captura(aba)
 
     gravacao = parar_e_pegar_gravacao(aba, portal)
     assert gravacao["name"] == "Tarefa gravada"
     assert gravacao["start_url"].endswith("/busca")
     assert "localhost" in gravacao["allowed_hosts"]
 
-    passos = gravacao["steps"]
+    # O que a tela final tem e não foi escolhido à mão entra sozinho, sem repetir o que já foi
+    automaticas = [p["capture_name"] for p in gravacao["steps"] if p.get("optional")]
+    assert automaticas == ["Acesso"]
+
+    passos = passos_da_pessoa(gravacao)
     assert [p["action"] for p in passos] == [
         "navigate",
         "fill",
@@ -182,6 +203,12 @@ def test_grava_digitacao_clique_e_captura(
     assert celula["target"]["anchor_kind"] == "table_header"
     assert celula["target"]["row_index"] == 1
 
+    assert [passo.get("capture_name") for passo in passos[3:]] == [
+        "Situação",
+        "Razão social",
+        "Valor",
+        "Tabela",
+    ]
     notas = passos[6]
     assert notas["capture_kind"] == "table"
     assert notas["target"]["neighbors"] == ["Número", "Valor"]
@@ -207,8 +234,7 @@ def test_nao_deixa_capturar_campo_de_senha(
     navegador_com_extensao: BrowserContext, portal: Portal
 ) -> None:
     aba = iniciar_gravacao(navegador_com_extensao, portal, "/campos-sigilosos")
-    barra(aba).get_by_role("button", name="Capturar dado").click()
-    barra(aba).get_by_text("Clique no dado").wait_for()
+    comecar_captura(aba)
     aba.locator("#senha").click()
     barra(aba).get_by_text("sigiloso").wait_for()
     assert "nao-pode-ler" not in barra(aba).inner_text()
@@ -221,10 +247,9 @@ def test_clique_para_apontar_nao_aciona_a_pagina(
     frame = aba.frame_locator("iframe")
     frame.locator("#no-iframe").wait_for()
 
-    barra(aba).get_by_role("button", name="Capturar dado").click()
-    barra(aba).get_by_text("Clique no dado").wait_for()
+    comecar_captura(aba)
     frame.locator("#no-iframe").click()
-    barra(aba).locator("input[type=text]").wait_for()
+    expect(barra(aba)).to_contain_text("Dados:")
     assert "/clicou-no-iframe" not in portal.requests
 
 
@@ -240,7 +265,9 @@ def test_valor_capturado_vira_referencia_no_passo_seguinte(
     navegador_com_extensao: BrowserContext, portal: Portal
 ) -> None:
     aba = iniciar_gravacao(navegador_com_extensao, portal, "/consulta?cnpj=111")
-    capturar(aba, "dd")
+    comecar_captura(aba)
+    capturar(aba, "dd", "Situação")
+    terminar_captura(aba)
     aba.goto(f"{portal.url}/erp")
     barra(aba).wait_for()
     aba.get_by_label("Situação no ERP").fill("ATIVA")
@@ -271,10 +298,15 @@ def test_janela_aberta_pelo_clique_entra_na_gravacao(
     janela = nova.value
     janela.wait_for_load_state()
     barra(janela).wait_for()
+    comecar_captura(janela)
     capturar(janela, "dd")
+    terminar_captura(janela)
     barra(janela).get_by_role("button", name="Parar e salvar").click()
     aba.wait_for_url("**/painel/tarefas/tarefa-gravada")
-    assert [p["action"] for p in portal.recordings[0]["steps"]] == ["navigate", "click", "capture"]
+    gravacao = portal.recordings[0]
+    assert [p["action"] for p in passos_da_pessoa(gravacao)] == ["navigate", "click", "capture"]
+    # A tela final é a da janela em que a pessoa clicou em salvar
+    assert "Razão social" in [p["capture_name"] for p in gravacao["steps"] if p.get("optional")]
 
 
 def test_evento_falso_criado_pela_pagina_e_ignorado(
@@ -379,8 +411,9 @@ def test_enter_no_campo_grava_uma_vez_e_sem_clique_falso(
     aba.wait_for_timeout(300)
 
     gravacao = parar_e_pegar_gravacao(aba, portal)
-    assert [p["action"] for p in gravacao["steps"]] == ["navigate", "fill", "press"]
-    assert gravacao["steps"][2]["value"] == "Enter"
+    passos = passos_da_pessoa(gravacao)
+    assert [p["action"] for p in passos] == ["navigate", "fill", "press"]
+    assert passos[2]["value"] == "Enter"
 
 
 def test_clique_de_script_nao_aciona_a_barra(
@@ -444,17 +477,14 @@ def test_texto_do_site_nunca_vira_html_na_barra(
     navegador_com_extensao: BrowserContext, portal: Portal
 ) -> None:
     aba = iniciar_gravacao(navegador_com_extensao, portal, "/texto-perigoso")
-    barra(aba).get_by_role("button", name="Capturar dado").click()
-    barra(aba).get_by_text("Clique no dado").wait_for()
+    comecar_captura(aba)
+    # O rótulo do site vira o nome do dado, que aparece na barra
     aba.locator("dd").click()
-    barra(aba).locator("input[type=text]").wait_for()
 
     expect(barra(aba)).to_contain_text("<img src=x")
     assert barra(aba).locator("img").count() == 0
     aba.wait_for_timeout(200)
     assert aba.evaluate("window.__invadido") is None
-    # O formulário aberto substitui a instrução de clicar no dado
-    expect(barra(aba)).not_to_contain_text("Clique no dado")
 
 
 def test_painel_nao_controla_a_gravacao_alem_de_iniciar(
@@ -472,7 +502,9 @@ def test_valor_muito_curto_nao_vira_referencia_por_coincidencia(
     navegador_com_extensao: BrowserContext, portal: Portal
 ) -> None:
     aba = iniciar_gravacao(navegador_com_extensao, portal, "/valor-curto")
-    capturar(aba, "dd")
+    comecar_captura(aba)
+    capturar(aba, "dd", "Código")
+    terminar_captura(aba)
     aba.get_by_label("Quantidade").fill("7")
     aba.get_by_label("Quantidade").blur()
     expect(barra(aba)).to_contain_text("3 passos")
@@ -638,16 +670,184 @@ def test_botoes_da_barra_nao_sao_refeitos_a_cada_passo(
     assert aba.evaluate("window.__botao.isConnected") is True
 
 
-def test_atualizar_a_barra_nao_apaga_o_nome_que_a_pessoa_esta_digitando(
+def test_mesmo_dado_duas_vezes_e_dado_sem_rotulo(
     navegador_com_extensao: BrowserContext, portal: Portal
 ) -> None:
     aba = iniciar_gravacao(navegador_com_extensao, portal, "/consulta?cnpj=111")
-    barra(aba).get_by_role("button", name="Capturar dado").click()
-    barra(aba).get_by_text("Clique no dado").wait_for()
+    comecar_captura(aba)
+    capturar(aba, "dd", "Situação")
     aba.locator("dd").click()
-    campo = barra(aba).locator("input[type=text]")
-    campo.wait_for()
-    campo.fill("Nome em digitação")
+    expect(barra(aba)).to_contain_text("já foi guardado")
+    # Mover a barra no meio da captura não desliga a escolha
     barra(aba).get_by_role("button", name="Mover").click()
     expect(barra(aba)).to_have_attribute("data-canto", "1")
-    assert campo.input_value() == "Nome em digitação"
+    barra(aba).get_by_role("button", name="Pronto").wait_for()
+    terminar_captura(aba)
+
+    gravacao = parar_e_pegar_gravacao(aba, portal)
+    capturas = [passo for passo in passos_da_pessoa(gravacao) if passo["action"] == "capture"]
+    assert [passo["capture_name"] for passo in capturas] == ["Situação"]
+
+
+def test_grava_planilha_e_a_repeticao_escreve_as_mesmas_celulas(
+    navegador_com_extensao: BrowserContext,
+    portal: Portal,
+    api: TestClient,
+    autenticado: dict[str, str],
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+) -> None:
+    aba = iniciar_gravacao(navegador_com_extensao, portal, "/planilha")
+    app = aba.frame_locator("#WacFrame_Excel_0")
+    grade = app.locator("#grade")
+    grade.wait_for()
+
+    # Como uma pessoa: clica na célula e digita direto na grade, andando com Tab e Enter
+    grade.click(position={"x": 10, "y": 5})
+    aba.keyboard.type("Produto")
+    aba.keyboard.press("Tab")
+    aba.keyboard.type("Janeiro")
+    aba.keyboard.press("Enter")
+    grade.click(position={"x": 10, "y": 25})
+    aba.keyboard.type("=SOMA(1;2)")
+    aba.keyboard.press("Enter")
+    # E também pela Barra de fórmulas
+    grade.click(position={"x": 170, "y": 5})
+    app.locator("#formulaBarTextDivId_textElement").click()
+    aba.keyboard.type("Fevereiro")
+    aba.keyboard.press("Enter")
+    expect(barra(aba)).to_contain_text('C1: "Fevereiro"')
+
+    gravacao = parar_e_pegar_gravacao(aba, portal)
+    # Nenhum clique na grade nem Enter solto: só "ir até a célula" e "escrever o valor"
+    assert [passo["action"] for passo in gravacao["steps"]] == ["navigate"] + ["fill"] * 8
+    celulas = [
+        (passo["spreadsheet_cell"], passo["spreadsheet_part"], passo["value"])
+        for passo in gravacao["steps"][1:]
+    ]
+    assert celulas == [
+        ("A1", "address", "A1\n"),
+        ("A1", "value", "Produto\n"),
+        ("B1", "address", "B1\n"),
+        ("B1", "value", "Janeiro\n"),
+        ("A2", "address", "A2\n"),
+        ("A2", "value", "=SOMA(1;2)\n"),
+        ("C1", "address", "C1\n"),
+        ("C1", "value", "Fevereiro\n"),
+    ]
+
+    # A repetição, numa planilha vazia: a tarefa ativa sem nenhuma pergunta
+    portal.planilha.clear()
+    criada = api.post("/api/v1/flows", json=gravacao, headers=autenticado)
+    assert criada.status_code == 201, criada.text
+    flow_id = criada.json()["id"]
+    with fabrica_sessao() as sessao:
+        analyze_flow(sessao, sessao.get(Flow, flow_id))
+    assert api.post(f"/api/v1/flows/{flow_id}/confirm", headers=autenticado).status_code == 200
+    execucao = api.post("/api/v1/runs", data={"flow_id": flow_id}, headers=autenticado)
+    assert execucao.status_code == 201, execucao.text
+
+    assert process_next_run(fabrica_sessao, navegador) is True
+    detalhe = api.get(f"/api/v1/runs/{execucao.json()['id']}", headers=autenticado).json()
+    assert detalhe["status"] == "succeeded", detalhe
+    esperado = {"A1": "Produto", "B1": "Janeiro", "A2": "=SOMA(1;2)", "C1": "Fevereiro"}
+    limite = time.monotonic() + 5
+    while portal.planilha != esperado and time.monotonic() < limite:
+        time.sleep(0.1)
+    assert portal.planilha == esperado
+
+
+def capturas_de(gravacao: dict[str, Any]) -> list[dict[str, Any]]:
+    return [passo for passo in gravacao["steps"] if passo["action"] == "capture"]
+
+
+def test_ao_salvar_guarda_sozinho_os_dados_da_tela_final(
+    navegador_com_extensao: BrowserContext, portal: Portal
+) -> None:
+    aba = iniciar_gravacao(navegador_com_extensao, portal, "/tela-final")
+    expect(barra(aba)).to_contain_text("guardados sozinhos")
+
+    # Só abrir a página e salvar já é uma tarefa: ler a tela
+    gravacao = parar_e_pegar_gravacao(aba, portal)
+    capturas = capturas_de(gravacao)
+    # Fora: menu e rodapé, hora, código, campo que a pessoa edita, rótulo repetido e valor vazio
+    assert [(passo["capture_name"], passo["capture_kind"]) for passo in capturas] == [
+        ("Notas emitidas", "table"),
+        ("CNPJ", "value"),
+        ("Porte", "value"),
+        ("Protocolo", "value"),
+        ("Situação", "value"),
+        ("Número do pedido", "value"),
+    ]
+    assert all(passo["optional"] for passo in capturas)
+    alvos = {passo["capture_name"]: passo["target"] for passo in capturas}
+    assert alvos["CNPJ"]["anchor_kind"] == "adjacent"
+    assert alvos["Protocolo"]["anchor"] == "Protocolo:"
+    assert alvos["Situação"]["anchor_kind"] == "inline"
+    assert alvos["Número do pedido"]["anchor_kind"] == "label"
+    assert alvos["Notas emitidas"]["neighbors"] == ["Número", "Valor"]
+
+
+def test_dado_ja_capturado_a_mao_nao_entra_de_novo_na_tela_final(
+    navegador_com_extensao: BrowserContext, portal: Portal
+) -> None:
+    aba = iniciar_gravacao(navegador_com_extensao, portal, "/tela-final")
+    comecar_captura(aba)
+    capturar(aba, "#protocolo", "Protocolo")
+    terminar_captura(aba)
+
+    capturas = capturas_de(parar_e_pegar_gravacao(aba, portal))
+    protocolo = [passo for passo in capturas if passo["capture_name"].startswith("Protocolo")]
+    # O que a pessoa escolheu continua obrigatório: se sumir, a execução pede ajuda
+    assert len(protocolo) == 1
+    assert "optional" not in protocolo[0]
+    assert protocolo[0]["capture_name"] == "Protocolo"
+
+
+def test_salvar_de_novo_depois_de_um_erro_le_a_tela_outra_vez(
+    navegador_com_extensao: BrowserContext, portal: Portal
+) -> None:
+    aba = iniciar_gravacao(navegador_com_extensao, portal, "/tela-final")
+    portal.flows_status = 500
+    barra(aba).get_by_role("button", name="Parar e salvar").click()
+    expect(barra(aba)).to_contain_text("Erro de teste")
+
+    portal.flows_status = 201
+    gravacao = parar_e_pegar_gravacao(aba, portal)
+    nomes = [passo["capture_name"] for passo in capturas_de(gravacao)]
+    assert len(nomes) == len(set(nomes)) == 6
+
+
+def test_dados_da_tela_final_repetidos_numa_execucao(
+    navegador_com_extensao: BrowserContext,
+    portal: Portal,
+    api: TestClient,
+    autenticado: dict[str, str],
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+) -> None:
+    aba = iniciar_gravacao(navegador_com_extensao, portal, "/tela-final")
+    gravacao = parar_e_pegar_gravacao(aba, portal)
+
+    criada = api.post("/api/v1/flows", json=gravacao, headers=autenticado)
+    assert criada.status_code == 201, criada.text
+    flow_id = criada.json()["id"]
+    with fabrica_sessao() as sessao:
+        analyze_flow(sessao, sessao.get(Flow, flow_id))
+    assert api.post(f"/api/v1/flows/{flow_id}/confirm", headers=autenticado).status_code == 200
+
+    # Na repetição, o protocolo não aparece: a tarefa segue com ele vazio
+    portal.tela_final_sem_protocolo = True
+    execucao = api.post("/api/v1/runs", data={"flow_id": flow_id}, headers=autenticado)
+    assert execucao.status_code == 201, execucao.text
+    assert process_next_run(fabrica_sessao, navegador) is True
+    detalhe = api.get(f"/api/v1/runs/{execucao.json()['id']}", headers=autenticado).json()
+    assert detalhe["status"] == "succeeded", detalhe
+    assert detalhe["items"][0]["output"] == {
+        "cnpj": "12.345.678/0001-90",
+        "porte": "ME",
+        "protocolo": "",
+        "situacao": "ATIVA",
+        "numero_do_pedido": "PED-5",
+    }
+    assert detalhe["items"][0]["table_rows"]["notas_emitidas"] == 2

@@ -1,16 +1,16 @@
 import { useState } from 'react'
 import { formatarDiaCurto } from '../../../lib/datas.js'
-import { editarPasso } from '../api.js'
+import { editarPasso, removerDado } from '../api.js'
 
 function PassoItem({ fluxoId, passo, aoMudar }) {
   const [enviando, setEnviando] = useState(false)
   const [erro, setErro] = useState(null)
 
-  async function editar(campos) {
+  async function enviar(pedido) {
     setEnviando(true)
     setErro(null)
     try {
-      await editarPasso(fluxoId, passo.id, campos)
+      await pedido()
       aoMudar()
     } catch (falha) {
       setErro(falha.message)
@@ -19,6 +19,9 @@ function PassoItem({ fluxoId, passo, aoMudar }) {
     }
   }
 
+  const editar = (campos) => enviar(() => editarPasso(fluxoId, passo.id, campos))
+  const remover = () => enviar(() => removerDado(fluxoId, passo.id))
+
   return (
     <li className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-2 border-t border-dashed border-tinta-media px-1 py-3">
       <span className="text-[16px] tabular-nums">{passo.posicao}</span>
@@ -26,11 +29,27 @@ function PassoItem({ fluxoId, passo, aoMudar }) {
         <p className="text-[17px] leading-snug break-words">{passo.intencao}</p>
         <div className="font-sans [text-shadow:none]">
           {passo.captura ? (
-            <p className="mt-1 text-[13.5px] text-grafite">
-              {passo.captura.tipo === 'tabela'
-                ? 'Lê a tabela inteira e guarda em uma aba própria do Excel'
-                : `Lê da tela e guarda na coluna "${passo.captura.rotulo}" do Excel`}
-            </p>
+            <>
+              <p className="mt-1 text-[13.5px] text-grafite">
+                {passo.captura.tipo === 'tabela'
+                  ? 'Lê a tabela inteira e guarda em uma aba própria do Excel'
+                  : `Lê da tela e guarda na coluna "${passo.captura.rotulo}" do Excel`}
+              </p>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13.5px]">
+                {passo.captura.automatica && (
+                  <span className="text-grafite">Guardado sozinho da tela final. Se faltar em uma execução, fica vazio.</span>
+                )}
+                <button
+                  type="button"
+                  disabled={enviando}
+                  onClick={remover}
+                  aria-label={`Remover o dado "${passo.captura.rotulo}"`}
+                  className="min-h-8 font-medium text-navy underline underline-offset-2 hover:text-rec-texto disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  {enviando ? 'Removendo...' : 'Remover'}
+                </button>
+              </div>
+            </>
           ) : (
             <p className="mt-1 text-[13.5px] text-grafite">Confere: {passo.posCondicao}</p>
           )}

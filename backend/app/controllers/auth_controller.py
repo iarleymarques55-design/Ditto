@@ -2,12 +2,13 @@ from fastapi import APIRouter, Depends, status
 
 from app.controllers.dependencies import UNAUTHORIZED_RESPONSE, CurrentUser, DbSession
 from app.core.rate_limit import limit_requests
-from app.core.security import create_recording_token
+from app.core.security import create_recording_token, create_runner_token
 from app.schemas.auth import (
     GoogleLoginRequest,
     LoginRequest,
     RecordingTokenResponse,
     RegisterRequest,
+    RunnerTokenResponse,
     TokenResponse,
     UserResponse,
 )
@@ -96,3 +97,22 @@ def me(user: CurrentUser) -> UserResponse:
 def create_recording_session(user: CurrentUser) -> RecordingTokenResponse:
     token, expires_at = create_recording_token(user.id)
     return RecordingTokenResponse(token=token, expires_at=expires_at)
+
+
+@router.post(
+    "/runner-token",
+    response_model=RunnerTokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ligar a extensão ao worker",
+    description=(
+        "Gera o token que a extensão usa para receber tarefas do worker e executá-las no Chrome "
+        "da pessoa, com as contas logadas nele. O worker só roda nesse Chrome as execuções de "
+        "quem gerou o token. Ele não dá acesso a nenhuma rota da API e deixa de valer quando a "
+        "senha é trocada."
+    ),
+    responses={**UNAUTHORIZED_RESPONSE, **_RATE_LIMIT_RESPONSE},
+    dependencies=[Depends(limit_requests(10))],
+)
+def create_runner_session(user: CurrentUser) -> RunnerTokenResponse:
+    token, expires_at = create_runner_token(user.id)
+    return RunnerTokenResponse(token=token, expires_at=expires_at)

@@ -1,7 +1,7 @@
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -117,10 +117,29 @@ class RecordedStep(BaseModel):
     capture_kind: CaptureKind | None = Field(
         default=None, description="Em `capture`: um valor ou uma tabela inteira."
     )
+    optional: bool = Field(
+        default=False,
+        description=(
+            "Em `capture`: o dado foi guardado sozinho, da tela final da gravação. Se ele não "
+            "aparecer em uma execução, fica vazio e a tarefa segue, em vez de parar."
+        ),
+    )
     value_from_capture: str | None = Field(
         default=None,
         max_length=120,
         description="Em vez de `value`: o nome de um dado capturado em um passo anterior.",
+    )
+    spreadsheet_cell: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z]{1,3}[1-9][0-9]{0,6}$",
+        description=(
+            "Em planilhas como o Excel Online: a célula deste passo, como `B1`. A extensão grava "
+            "cada célula como dois passos: ir até ela pela Caixa de Nome e escrever o valor."
+        ),
+    )
+    spreadsheet_part: Literal["address", "value"] | None = Field(
+        default=None,
+        description="Com `spreadsheet_cell`: `address` vai até a célula, `value` escreve nela.",
     )
 
     @model_validator(mode="after")
@@ -130,8 +149,14 @@ class RecordedStep(BaseModel):
             raise ValueError("um passo capture precisa de capture_name")
         if not is_capture and (self.capture_name or self.capture_kind):
             raise ValueError("capture_name só vale em passos capture")
+        if self.optional and not is_capture:
+            raise ValueError("optional só vale em passos capture")
         if self.value_from_capture and self.action not in {StepAction.FILL, StepAction.SELECT}:
             raise ValueError("value_from_capture só vale em fill e select")
+        if (self.spreadsheet_cell is None) != (self.spreadsheet_part is None):
+            raise ValueError("spreadsheet_cell e spreadsheet_part andam juntos")
+        if self.spreadsheet_cell and self.action != StepAction.FILL:
+            raise ValueError("spreadsheet_cell só vale em fill")
         return self
 
     @model_validator(mode="after")

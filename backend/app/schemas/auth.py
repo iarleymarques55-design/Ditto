@@ -87,6 +87,13 @@ class RecordingTokenResponse(BaseModel):
     expires_at: datetime = Field(description="Quando o token deixa de valer.")
 
 
+class RunnerTokenResponse(BaseModel):
+    token: str = Field(
+        description="Token que liga a extensão ao worker. Não vale em nenhuma rota da API."
+    )
+    expires_at: datetime = Field(description="Quando o token deixa de valer.")
+
+
 class TokenResponse(BaseModel):
     access_token: str = Field(description="Token JWT, enviado depois no cabeçalho Authorization.")
     token_type: str = Field(default="bearer", description="Sempre `bearer`.")

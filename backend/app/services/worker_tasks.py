@@ -104,9 +104,11 @@ def purge_expired_artifacts(session: Session) -> int:
     return len(artifacts)
 
 
-def claim_next_run(session: Session) -> uuid.UUID | None:
+def claim_next_run(session: Session, owner_id: uuid.UUID | None = None) -> uuid.UUID | None:
+    """Com `owner_id`, só pega execuções daquela conta: no Chrome da pessoa, nunca roda
+    a tarefa de outra."""
     runs = RunRepository(session)
-    run = runs.claim_queued()
+    run = runs.claim_queued(owner_id)
     if run is None:
         session.rollback()
         return None
@@ -135,9 +137,10 @@ def process_next_run(
     session_factory: Callable[[], Session],
     browser: Browser,
     repairer: LlmRepairer | None = None,
+    owner_id: uuid.UUID | None = None,
 ) -> bool:
     with session_factory() as session:
-        run_id = claim_next_run(session)
+        run_id = claim_next_run(session, owner_id)
     if run_id is None:
         return False
 

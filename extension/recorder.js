@@ -148,10 +148,6 @@
     return Object.fromEntries(Object.entries(alvo).filter(([, valor]) => valor !== undefined))
   }
 
-  function gravar(passo) {
-    enviar({ type: 'ditto:step', step: passo })
-  }
-
   // Enter e "change" avisam do mesmo preenchimento: o que já foi gravado não é gravado de novo
   const jaGravado = new WeakMap()
   // O valor é guardado a cada tecla: o site pode trocar o campo antes de a pessoa sair dele
@@ -209,10 +205,67 @@
     terminarDigitacao()
   }
 
+  // Planilhas desenhadas como imagem (Excel Online): as teclas vão para um campo escondido da
+  // grade, que não serve na repetição. Cada célula vira "ir até ela pela Caixa de Nome" e
+  // "escrever o valor na Barra de fórmulas", o caminho que o Ditto consegue repetir.
+  const PLANILHA = {
+    caixa: '#FormulaBar-NameBox-input',
+    campos: '#gridKeyboardContentEditable_textElement, #formulaBarTextDivId_textElement',
+    alvoCaixa: { css: '#FormulaBar-NameBox-input', tag: 'input', role: 'combobox', label: 'Caixa de Nome' },
+    alvoBarra: { css: '#formulaBarTextDivId_textElement', tag: 'div', role: 'textbox', label: 'formula bar' },
+  }
+  const TECLAS_QUE_CONFIRMAM_A_CELULA = ['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
+  // A célula sendo digitada agora: o endereço é lido da Caixa de Nome na primeira tecla
+  let celulaEmEdicao = null
+
+  function campoDePlanilha(origem) {
+    return origem instanceof Element ? origem.closest(PLANILHA.campos) : null
+  }
+
+  function celulaAtiva() {
+    const endereco = (document.querySelector(PLANILHA.caixa)?.value ?? '').replace(/[\u200e\u200f]/g, '').trim().toUpperCase()
+    return /^[A-Z]{1,3}[1-9][0-9]{0,6}$/.test(endereco) ? endereco : null
+  }
+
+  function gravarCelula() {
+    const celula = celulaEmEdicao
+    celulaEmEdicao = null
+    if (!celula?.endereco || !celula.valor) return
+    // Uma quebra de linha no valor confirmaria a célula antes da hora na repetição
+    const valor = celula.valor.replace(/\s*\n\s*/g, ' ').slice(0, 4990)
+    const base = { action: 'fill', spreadsheet_cell: celula.endereco }
+    gravar({ ...base, spreadsheet_part: 'address', target: PLANILHA.alvoCaixa, value: `${celula.endereco}\n` })
+    gravar({ ...base, spreadsheet_part: 'value', target: PLANILHA.alvoBarra, value: `${valor}\n` })
+  }
+
+  document.addEventListener(
+    'keydown',
+    (evento) => {
+      if (!evento.isTrusted || !celulaEmEdicao || naBarra(evento)) return
+      if (evento.key === 'Escape') {
+        celulaEmEdicao = null
+        return
+      }
+      if (!TECLAS_QUE_CONFIRMAM_A_CELULA.includes(evento.key)) return
+      // Na Barra de fórmulas as setas só andam pelo texto
+      if (evento.key.startsWith('Arrow') && celulaEmEdicao.el.id.startsWith('formulaBar')) return
+      // Lido antes de o Excel limpar o campo: este ouvinte roda primeiro
+      celulaEmEdicao.valor = valorDe(celulaEmEdicao.el) || celulaEmEdicao.valor
+      gravarCelula()
+    },
+    true,
+  )
+
   document.addEventListener(
     'input',
     (evento) => {
       if (!evento.isTrusted || naBarra(evento)) return
+      const planilha = campoDePlanilha(evento.composedPath()[0])
+      if (planilha) {
+        const endereco = celulaEmEdicao?.endereco ?? celulaAtiva()
+        celulaEmEdicao = { endereco, el: planilha, valor: valorDe(planilha) }
+        return
+      }
       const el = campoDe(evento.composedPath()[0])
       if (!el) return
       if (digitando && digitando.el !== el) terminarDigitacao()
@@ -268,6 +321,8 @@
     'pointerdown',
     (evento) => {
       if (!evento.isTrusted || escolhendo || evento.button !== 0 || naBarra(evento)) return
+      // Clicar em outra célula confirma a que estava sendo digitada; clicar na barra continua nela
+      if (celulaEmEdicao && !campoDePlanilha(evento.composedPath()[0])) gravarCelula()
       terminarDigitacao()
       // O clique anterior agiu e sumiu da página, e o próximo chegou antes do fim da espera
       if (apertado && !apertado.el.isConnected) gravar({ action: 'click', target: apertado.alvo })
@@ -342,6 +397,8 @@
     'keydown',
     (evento) => {
       if (!evento.isTrusted || evento.key !== 'Enter' || naBarra(evento)) return
+      // Célula de planilha já foi gravada pelo ouvinte dela
+      if (campoDePlanilha(evento.composedPath()[0])) return
       const el = campoDe(evento.composedPath()[0])
       if (!el) return
 
@@ -451,7 +508,7 @@
     const pick = {
       target: Object.fromEntries(Object.entries(alvo).filter(([, valor]) => valor !== undefined)),
       preview: (achado?.valor ?? valorDoDado(achado?.elemento ?? el)).slice(0, 200),
-      suggestedName: achado?.anchor ?? '',
+      suggestedName: nomeDoRotulo(achado?.anchor || nomeProprio(el)).slice(0, 120),
       hasAnchor: Boolean(achado),
     }
 
@@ -466,9 +523,174 @@
         },
         rows: Math.max(tabela.rows.length - 1, 0),
       }
+      // Clicar no cabeçalho é pedir a tabela inteira; numa célula comum, só aquele valor
+      const celula = el.closest('th, td')
+      pick.wholeTable = Boolean(celula && (celula.tagName === 'TH' || celula.parentElement === cabecalho))
+      pick.tableName = nomeDaTabela(tabela)
     }
     return pick
   }
+
+  // Sem rótulo ao lado, o nome vem do próprio elemento: o que um leitor de tela diria dele
+  function nomeProprio(el) {
+    for (const atributo of ['aria-label', 'title', 'placeholder', 'name']) {
+      const texto = limpar(el.getAttribute(atributo))
+      if (curto(texto)) return texto
+    }
+    return ''
+  }
+
+  function nomeDaTabela(tabela) {
+    const legenda = limpar(tabela.caption?.innerText) || limpar(tabela.getAttribute('aria-label'))
+    if (curto(legenda)) return legenda
+    // O título mais próximo antes da tabela, como "Notas emitidas"
+    let anterior = tabela.previousElementSibling
+    for (let passos = 0; anterior && passos < 5; passos++, anterior = anterior.previousElementSibling) {
+      if (/^H[1-6]$/.test(anterior.tagName) && curto(limpar(anterior.innerText))) return limpar(anterior.innerText)
+    }
+    return ''
+  }
+
+  // Ao salvar, os dados da tela final são guardados sozinhos: tabelas e pares "rótulo: valor".
+  // Só entra o que a repetição sabe achar de novo pelo mesmo rótulo; menu e rodapé ficam de fora.
+
+  const FORA_DO_CONTEUDO =
+    'nav,header,footer,aside,[role=navigation],[role=banner],[role=contentinfo],[role=search],[aria-hidden=true],ditto-gravador'
+  const MAX_DADOS_DA_TELA = 40
+  const MAX_VALOR_DA_TELA = 200
+  const TEM_LETRA = /\p{L}/u
+  // "Razão social", "Nº do pedido (atual)". Não serve: código, JSON, hora ("Horário 10:30"), endereço web.
+  const PARECE_ROTULO = /^\p{L}[\p{L}\p{N}\s.,()/ºª°-]*$/u
+  const rotuloValido = (texto) => PARECE_ROTULO.test(texto) && !/\d$/.test(texto) && !/^https?$/i.test(texto)
+  const DOIS_PONTOS_NO_FIM = /\s*:\s*$/
+
+  const naTela = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'
+  const noConteudo = (el) => naTela(el) && !el.closest(FORA_DO_CONTEUDO)
+  const ehFolha = (el) => el.children.length === 0
+  const nomeDoRotulo = (texto) => texto.replace(DOIS_PONTOS_NO_FIM, '')
+
+  // Campo que a pessoa ainda pode editar é formulário, não resultado
+  function editavel(el) {
+    if (!['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) return false
+    return !el.readOnly && !el.disabled
+  }
+
+  // Ficha: tabela de uma coluna de rótulos (th) e outra de valores, como "CNPJ | 12.345..."
+  function ehFicha(tabela) {
+    const linhas = [...tabela.rows]
+    return linhas.length > 0 && linhas.every((linha) => linha.cells[0]?.tagName === 'TH' && linha.cells.length >= 2)
+  }
+
+  // Tabela de dados: cabeçalho com pelo menos duas colunas de nome curto, sem tabela dentro
+  function ehTabelaDeDados(tabela) {
+    if (tabela.rows.length < 2 || tabela.querySelector('table') || ehFicha(tabela)) return false
+    const cabecalho = tabela.tHead?.rows[0] ?? tabela.rows[0]
+    const nomes = [...cabecalho.cells].map((celula) => limpar(celula.innerText))
+    return nomes.filter((nome) => curto(nome)).length >= 2 && nomes.every((nome) => !nome || curto(nome))
+  }
+
+  function varrerTela() {
+    if (!document.body) return []
+
+    // A repetição lê o primeiro texto igual da página: rótulo repetido apontaria para o dado errado
+    const folhas = []
+    const vezes = new Map()
+    for (const el of document.body.querySelectorAll('*')) {
+      if (!ehFolha(el) || (el.textContent ?? '').length > 300 || !naTela(el)) continue
+      const texto = limpar(el.innerText)
+      if (!texto) continue
+      folhas.push([el, texto])
+      vezes.set(texto, (vezes.get(texto) ?? 0) + 1)
+    }
+    const unico = (texto) => vezes.get(texto) === 1
+    const prefixoUnico = (prefixo) => folhas.filter(([, texto]) => texto.startsWith(prefixo)).length === 1
+
+    const achados = []
+    const vistos = new Set()
+    const tabelasGuardadas = new Set()
+    const dentroDeTabelaGuardada = (el) => {
+      const tabela = el.closest('table')
+      return Boolean(tabela && [...tabelasGuardadas].some((guardada) => guardada.contains(tabela)))
+    }
+    const guardar = (el, pick) => {
+      const chave = `${pick.target.anchor_kind ?? 'tabela'}|${pick.target.anchor ?? pick.target.css}`
+      if (vistos.has(chave) || achados.length >= MAX_DADOS_DA_TELA) return
+      vistos.add(chave)
+      achados.push({ el, pick })
+    }
+    const parDeValor = (el, rotulo, kind, valorEl) => {
+      if (!valorEl || !noConteudo(valorEl) || editavel(valorEl) || ehSensivel(valorEl) || valorEl.querySelector('table,input,select,textarea')) return
+      const valor = valorDoDado(valorEl)
+      // Um valor que é outro rótulo ("Endereço:") quer dizer que o campo estava vazio
+      if (!valor || valor.length > MAX_VALOR_DA_TELA || DOIS_PONTOS_NO_FIM.test(valor)) return
+      guardar(el, {
+        target: { tag: valorEl.tagName.toLowerCase(), css: seletorCss(valorEl).slice(0, 1000) || undefined, anchor: rotulo.slice(0, 300), anchor_kind: kind },
+        preview: valor,
+        suggestedName: nomeDoRotulo(rotulo).slice(0, 120),
+        hasAnchor: true,
+      })
+    }
+
+    for (const tabela of document.body.querySelectorAll('table')) {
+      if (achados.length >= MAX_DADOS_DA_TELA) break
+      if (!noConteudo(tabela) || dentroDeTabelaGuardada(tabela) || !ehTabelaDeDados(tabela)) continue
+      const cabecalho = tabela.tHead?.rows[0] ?? tabela.rows[0]
+      const pick = descrever(cabecalho.cells[0])
+      if (!pick.table) continue
+      tabelasGuardadas.add(tabela)
+      guardar(tabela, { ...pick, wholeTable: true })
+    }
+
+    for (const [el, texto] of folhas) {
+      if (achados.length >= MAX_DADOS_DA_TELA) break
+      if (!noConteudo(el) || dentroDeTabelaGuardada(el) || !TEM_LETRA.test(texto)) continue
+
+      // "Situação: Ativa" no mesmo elemento
+      const pedaco = /^([^:]{1,60}):\s*(.+)$/.exec(texto)
+      if (pedaco) {
+        const rotulo = pedaco[1].trim()
+        if (rotuloValido(rotulo) && texto.startsWith(`${rotulo}:`) && prefixoUnico(`${rotulo}:`) && pedaco[2].length <= MAX_VALOR_DA_TELA) {
+          guardar(el, {
+            target: { tag: el.tagName.toLowerCase(), css: seletorCss(el).slice(0, 1000) || undefined, anchor: rotulo, anchor_kind: 'inline' },
+            preview: pedaco[2].trim(),
+            suggestedName: rotulo.slice(0, 120),
+            hasAnchor: true,
+          })
+        }
+        continue
+      }
+      if (!curto(texto) || !unico(texto) || !rotuloValido(nomeDoRotulo(texto))) continue
+
+      // "Nome" com o valor no elemento seguinte: termo de definição, linha de ficha ou rótulo com dois-pontos
+      if (el.tagName === 'DT') {
+        if (el.nextElementSibling?.tagName === 'DD') parDeValor(el, texto, 'definition', el.nextElementSibling)
+        continue
+      }
+      const linhaDeFicha = el.tagName === 'TH' && el.parentElement?.cells?.[0] === el && ehFicha(el.closest('table'))
+      if (linhaDeFicha || DOIS_PONTOS_NO_FIM.test(texto)) {
+        // Mesma ordem em que a repetição procura o valor
+        parDeValor(el, texto, 'adjacent', el.nextElementSibling ?? el.parentElement?.nextElementSibling)
+      }
+    }
+
+    // Campo só de leitura com rótulo, como um número de protocolo mostrado em um formulário
+    for (const rotuloEl of document.body.querySelectorAll('label')) {
+      if (achados.length >= MAX_DADOS_DA_TELA) break
+      const campo = rotuloEl.control
+      const texto = limpar(rotuloEl.innerText)
+      if (!campo || editavel(campo) || !['INPUT', 'SELECT', 'TEXTAREA'].includes(campo.tagName)) continue
+      if (!noConteudo(campo) || ehSensivel(campo) || !curto(texto) || !rotuloValido(nomeDoRotulo(texto))) continue
+      const pick = descrever(campo)
+      if (pick.target.anchor_kind === 'label' && pick.preview) guardar(campo, { ...pick, suggestedName: nomeDoRotulo(pick.suggestedName) })
+    }
+
+    // Na ordem em que aparecem na tela
+    achados.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+    return achados.map(({ pick }) => pick)
+  }
+
+  // Chamado pelo serviço da extensão, que roda este código no mesmo mundo isolado do gravador
+  globalThis.__dittoVarrerTela = varrerTela
 
   function aoMover(evento) {
     const el = evento.composedPath()[0]
@@ -553,10 +775,8 @@
 
   let barra = null
   let estadoAtual = null
-  let formulario = null
   let relogio = null
   let partes = {}
-  let ultimoFormulario = 0
 
   const tempo = (inicio) => {
     const segundos = Math.max(0, Math.floor((Date.now() - inicio) / 1000))
@@ -595,24 +815,25 @@
       'info',
       `<div class="info">${escapar(estado.name)}, ${passos}</div>
       ${estado.last ? `<div class="ultimo">Anotado: ${escapar(estado.last)}</div>` : ''}
-      ${estado.picking ? '<div class="info"><b>Clique no dado que quer capturar.</b> Esc cancela.</div>' : ''}
+      ${
+        estado.picking
+          ? `<div class="info"><b>Clique em cada dado que quer guardar.</b> Cada clique já fica salvo, com o nome do rótulo ao lado. Clicar no cabeçalho de uma tabela guarda a tabela inteira. Esc ou Pronto termina.</div>`
+          : '<div class="info">Ao salvar, as tabelas e os dados da tela em que você estiver são guardados sozinhos.</div>'
+      }
+      ${estado.captures?.length ? `<div class="ultimo">Dados: ${escapar(estado.captures.join(', '))}</div>` : ''}
       ${estado.limitReached ? '<div class="aviso">Limite de 200 passos: novas ações não são gravadas.</div>' : ''}
       ${estado.warning ? `<div class="aviso">${escapar(estado.warning)}</div>` : ''}
       ${estado.error ? `<div class="erro" role="alert">${escapar(estado.error)}</div>` : ''}`,
     )
 
-    if (formulario) {
-      // O formulário só é refeito quando é outro dado: a pessoa pode estar digitando nele
-      if (desenharParte('acoes', desenharFormulario(), `formulario-${formulario.id}`)) ligarFormulario()
-      return
-    }
     const acoes = `<div class="acoes">
-        <button data-acao="capturar" ${estado.picking ? 'disabled' : ''}>Capturar dado</button>
+        ${estado.picking ? '<button data-acao="pronto" class="cheio">Pronto</button>' : '<button data-acao="capturar">Capturar dados</button>'}
         <button data-acao="parar" class="cheio" ${estado.sending ? 'disabled' : ''}>${estado.sending ? 'Salvando...' : 'Parar e salvar'}</button>
         <button data-acao="descartar" class="leve" ${estado.sending ? 'disabled' : ''}>Descartar</button>
       </div>`
     if (desenharParte('acoes', acoes)) {
       aoClicarNaBarra('[data-acao=capturar]', () => enviar({ type: 'ditto:pick-start' }))
+      aoClicarNaBarra('[data-acao=pronto]', () => enviar({ type: 'ditto:pick-stop' }))
       aoClicarNaBarra('[data-acao=parar]', () => enviar({ type: 'ditto:stop' }))
       aoClicarNaBarra('[data-acao=descartar]', () => {
         if (window.confirm('Descartar esta gravação? O que foi feito até agora se perde.')) enviar({ type: 'ditto:discard' })
@@ -635,68 +856,6 @@
     })
   }
 
-  function desenharFormulario() {
-    if (formulario.recusado) {
-      return `<div class="form"><div class="erro">${escapar(formulario.recusado)}</div><div class="acoes"><button data-form="cancelar">Entendi</button></div></div>`
-    }
-    const tabela = formulario.table
-    return `<div class="form">
-      <div class="previa">Valor agora: <b>${escapar(formulario.preview || '(vazio)')}</b></div>
-      ${formulario.hasAnchor ? '' : '<div class="aviso">Não achei um rótulo perto deste dado. Se o site mudar, o Ditto pode não encontrá-lo.</div>'}
-      <label class="campo">Como chamar este dado?<input type="text" data-form="nome" maxlength="120" value="${escapar(formulario.nome).replaceAll('"', '&quot;')}"></label>
-      ${
-        tabela
-          ? `<label class="opcao"><input type="radio" name="tipo" value="value" ${formulario.tipo === 'value' ? 'checked' : ''}> Só este valor</label>
-             <label class="opcao"><input type="radio" name="tipo" value="table" ${formulario.tipo === 'table' ? 'checked' : ''}> A tabela inteira (${tabela.rows} ${tabela.rows === 1 ? 'linha' : 'linhas'})</label>`
-          : ''
-      }
-      <div class="erro" data-form="erro" hidden></div>
-      <div class="acoes"><button class="cheio" data-form="salvar">Salvar</button><button class="leve" data-form="cancelar">Cancelar</button></div>
-    </div>`
-  }
-
-  function ligarFormulario() {
-    aoClicarNaBarra('[data-form=cancelar]', () => {
-      formulario = null
-      desenhar()
-    })
-    const nome = barra.querySelector('[data-form=nome]')
-    if (!nome) return
-    nome.focus()
-    nome.addEventListener('input', () => {
-      formulario.nome = nome.value
-    })
-    for (const opcao of barra.querySelectorAll('input[name=tipo]')) {
-      opcao.addEventListener('change', () => {
-        formulario.tipo = opcao.value
-      })
-    }
-    aoClicarNaBarra('[data-form=salvar]', () => {
-      const texto = limpar(nome.value)
-      const erro = barra.querySelector('[data-form=erro]')
-      if (!texto) {
-        erro.hidden = false
-        erro.textContent = 'Escreva um nome para o dado.'
-        return
-      }
-      if (estadoAtual.captures.some((nomeJaUsado) => nomeJaUsado.toLowerCase() === texto.toLowerCase())) {
-        erro.hidden = false
-        erro.textContent = 'Já existe um dado com este nome.'
-        return
-      }
-      const ehTabela = formulario.tipo === 'table'
-      gravar({
-        action: 'capture',
-        capture_name: texto,
-        capture_kind: ehTabela ? 'table' : 'value',
-        target: ehTabela ? formulario.table.target : formulario.target,
-        example: ehTabela ? '' : formulario.preview,
-      })
-      formulario = null
-      desenhar()
-    })
-  }
-
   chrome.runtime.onMessage.addListener((mensagem) => {
     if (mensagem.type === 'ditto:pick-start') comecarEscolha()
     if (mensagem.type === 'ditto:pick-stop') pararEscolha()
@@ -704,11 +863,6 @@
 
     if (mensagem.type === 'ditto:state') {
       estadoAtual = mensagem.state
-      desenhar()
-    }
-    if (mensagem.type === 'ditto:picked') {
-      const pick = mensagem.pick
-      formulario = { ...pick, nome: pick.suggestedName ?? '', tipo: 'value', id: ++ultimoFormulario }
       desenhar()
     }
   })

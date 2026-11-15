@@ -215,7 +215,11 @@ function GravarTarefa() {
               <p className={classeTexto}>A gravação está na aba nova. Faça a tarefa lá, no seu ritmo.</p>
               <ul className="mt-3 list-disc space-y-1.5 pl-5 text-[15px] leading-relaxed text-navy">
                 <li>
-                  Precisa guardar um valor da tela? Clique em <strong>Capturar dado</strong> na barra e depois no valor.
+                  Os dados da última tela, como tabelas e pares "Situação: Ativa", são guardados sozinhos quando você salva. O que não quiser, você
+                  remove na revisão.
+                </li>
+                <li>
+                  Precisa de um valor de uma tela do meio do caminho? Clique em <strong>Capturar dados</strong> na barra e depois no valor.
                 </li>
                 <li>
                   A cada ação, a barra mostra o que foi anotado. Se uma ação sua não aparecer, ela não será repetida.

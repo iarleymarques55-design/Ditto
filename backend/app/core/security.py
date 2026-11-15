@@ -9,6 +9,7 @@ from app.core.exceptions import UnauthorizedError
 
 ALGORITHM = "HS256"
 RECORDING_SCOPE = "recording"
+RUNNER_SCOPE = "runner"
 # Comparado quando o e-mail não existe, para o tempo de resposta não revelar quem tem conta
 _DUMMY_HASH = bcrypt.hashpw(b"ditto-usuario-inexistente", bcrypt.gensalt())
 
@@ -35,13 +36,27 @@ def create_access_token(user_id: uuid.UUID) -> str:
     return jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
 
 
-def create_recording_token(user_id: uuid.UUID) -> tuple[str, datetime]:
-    """Token da extensão: dura pouco e só serve para enviar gravações, nunca para ler a conta."""
+def _create_scoped_token(
+    user_id: uuid.UUID, scope: str, lifetime: timedelta
+) -> tuple[str, datetime]:
     now = datetime.now(UTC)
-    expires_at = now + timedelta(minutes=settings.recording_token_minutes)
-    payload = {"sub": str(user_id), "iat": now, "exp": expires_at, "scope": RECORDING_SCOPE}
+    expires_at = now + lifetime
+    payload = {"sub": str(user_id), "iat": now, "exp": expires_at, "scope": scope}
     token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
     return token, expires_at
+
+
+def create_recording_token(user_id: uuid.UUID) -> tuple[str, datetime]:
+    """Token da extensão: dura pouco e só serve para enviar gravações, nunca para ler a conta."""
+    return _create_scoped_token(
+        user_id, RECORDING_SCOPE, timedelta(minutes=settings.recording_token_minutes)
+    )
+
+
+def create_runner_token(user_id: uuid.UUID) -> tuple[str, datetime]:
+    """Token que liga a extensão ao worker, para as tarefas rodarem no Chrome da pessoa.
+    Não vale em nenhuma rota da API."""
+    return _create_scoped_token(user_id, RUNNER_SCOPE, timedelta(days=settings.runner_token_days))
 
 
 def decode_access_token(token: str) -> tuple[uuid.UUID, int, str | None]:

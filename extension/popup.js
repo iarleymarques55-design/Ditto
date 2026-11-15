@@ -7,6 +7,18 @@ function criar(tag, propriedades = {}, texto = '') {
   return el
 }
 
+const TEXTO_DO_EXECUTOR = {
+  conectado: 'Executor ligado: as tarefas rodam neste Chrome.',
+  conectando: 'Executor: procurando o worker do Ditto...',
+  desconectado: 'Executor: o worker do Ditto não está no ar. As tarefas esperam na fila.',
+  recusado: 'Executor: a conexão expirou. Conecte de novo na página da conta do painel.',
+  'sem-token': 'Executor desligado. Para rodar as tarefas neste Chrome, conecte na página da conta do painel.',
+}
+
+function linhaDoExecutor(status) {
+  return criar('p', { className: status === 'conectado' ? 'executor ligado' : 'executor' }, TEXTO_DO_EXECUTOR[status] ?? '')
+}
+
 async function desenhar() {
   const estado = await chrome.runtime.sendMessage({ type: 'ditto:status' })
   conteudo.replaceChildren()
@@ -15,6 +27,7 @@ async function desenhar() {
     conteudo.append(
       criar('h1', {}, 'Nenhuma gravação agora'),
       criar('p', {}, 'Para gravar, abra o painel do Ditto e clique em "Gravar tarefa". Só as abas iniciadas por lá são gravadas.'),
+      linhaDoExecutor(estado?.runner),
     )
     return
   }
@@ -35,7 +48,7 @@ async function desenhar() {
     desenhar()
   })
   acoes.append(parar, descartar)
-  conteudo.append(acoes)
+  conteudo.append(acoes, linhaDoExecutor(estado.runner))
 }
 
 desenhar()

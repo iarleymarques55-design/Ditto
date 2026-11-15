@@ -34,6 +34,32 @@ python -m app.worker                      # quem analisa as gravações e tira a
 
 Sem o worker, a API funciona, mas as gravações ficam em análise e as execuções ficam na fila.
 
+### Rodar no seu Chrome
+
+Por padrão, o worker abre um navegador próprio e limpo para cada linha. Ele também pode trabalhar no seu Chrome do dia a dia, pela [extensão](../extension/README.md), em uma aba ao lado da que você está usando e com as contas logadas nele:
+
+1. No `.env`, coloque `EXTENSION_RUNNER_PORT=8765` e reinicie o worker.
+2. Recarregue a extensão em `chrome://extensions`. Ela pede a permissão nova de depuração.
+3. No painel, abra a página da conta e clique em **Ligar neste Chrome**, na seção "Executar no meu Chrome".
+
+```mermaid
+flowchart LR
+    W[Worker<br/>motor de sempre, Playwright] -->|CDP| R[Relé<br/>127.0.0.1:8765]
+    R -->|WebSocket + token| E[Extensão<br/>chrome.debugger]
+    E --> A[Aba nova ao lado da sua]
+```
+
+O relé ([extension_relay.py](app/services/engine/extension_relay.py)) se apresenta ao Playwright como um navegador que só tem as abas do Ditto. Por isso o motor, o reparo e a captura continuam iguais. Regras:
+
+- Só as abas abertas pelo Ditto, e as janelas que elas abrem, são controladas. As suas abas nunca são tocadas, e o filtro de domínios vale só nas do Ditto.
+- O worker só roda nesse Chrome as execuções da conta que conectou a extensão. As de outra conta esperam.
+- O token do executor dura 30 dias e não vale em nenhuma rota da API. Trocar a senha o invalida.
+- Os downloads caem na sua pasta Downloads. O relé copia cada arquivo para o Ditto e apaga o original.
+- Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". O Chrome exige essa faixa. Clicar em "Cancelar" nela para a linha.
+- Sem a extensão conectada, as execuções esperam na fila.
+- A linha usa as suas sessões e não passa pelo proxy que barra a rede interna. Por isso é só para o seu computador: com `ENVIRONMENT=production`, a configuração recusa a porta.
+- Se o Chrome estiver configurado para perguntar onde salvar cada arquivo, o download espera você responder.
+
 ```bash
 createdb -U postgres ditto_test   # banco só dos testes: é apagado a cada execução
 python -m pytest                  # testes, com PostgreSQL e Chromium de verdade

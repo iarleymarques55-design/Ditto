@@ -25,6 +25,8 @@ function descreverPosCondicao({ type: tipo, extension: extensao, value: valor } 
       return `o endereço contém "${valor}"`
     case 'text_visible':
       return `aparece "${valor}" na tela`
+    case 'text_stable':
+      return 'o texto para de mudar antes de ser lido'
     default:
       return 'sem verificação automática'
   }
@@ -56,7 +58,13 @@ function mapearResumo(fluxo) {
 
 function mapearCaptura(passo) {
   if (!passo.capture_key) return null
-  return { chave: passo.capture_key, rotulo: passo.capture_label, tipo: passo.capture_kind === 'table' ? 'tabela' : 'valor' }
+  return {
+    chave: passo.capture_key,
+    rotulo: passo.capture_label,
+    tipo: passo.capture_kind === 'table' ? 'tabela' : 'valor',
+    // Guardado sozinho da tela final: se não aparecer, fica vazio e a tarefa segue
+    automatica: Boolean(passo.postcondition?.optional),
+  }
 }
 
 function mapearPasso(passo) {
@@ -113,6 +121,11 @@ export function ativarFluxo(fluxoId) {
 }
 
 export function arquivarFluxo(fluxoId) {
+  return pedir(`/flows/${fluxoId}/archive`, { metodo: 'POST' })
+}
+
+// Para sempre: passos, agenda, execuções e arquivos baixados
+export function excluirFluxo(fluxoId) {
   return pedir(`/flows/${fluxoId}`, { metodo: 'DELETE' })
 }
 
@@ -124,6 +137,11 @@ export function editarPasso(fluxoId, passoId, campos) {
       ...(campos.autoConfirma !== undefined ? { auto_confirm: campos.autoConfirma } : {}),
     },
   })
+}
+
+// Só passos de captura: o dado sai do Excel e os passos seguintes sobem uma posição
+export function removerDado(fluxoId, passoId) {
+  return pedir(`/flows/${fluxoId}/steps/${passoId}`, { metodo: 'DELETE' })
 }
 
 export function salvarAcesso({ dominio, usuario, senha }) {
