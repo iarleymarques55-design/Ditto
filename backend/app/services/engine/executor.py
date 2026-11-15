@@ -1,5 +1,6 @@
 """Executa um passo subindo a escada de reparo, da opção mais barata para a mais cara."""
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -66,6 +67,62 @@ class StepPlan:
     has_recorded_login: bool = False
 
 
+# Alvo de um passo de teclado que age onde o cursor está, sem procurar elemento
+FOCUSED_TARGET: dict[str, Any] = {"focused": True}
+_KEYBOARD_ACTIONS = {StepAction.FILL, StepAction.PRESS}
+_KEYS_IN_TEXT = {"\t": "Tab", "\n": "Enter"}
+# Só a descrição dos elementos (tipo, id, função, tamanho), nunca o que está escrito neles
+_FOCUS_REPORT = """() => {
+  const describe = (el) => {
+    if (!el) return null
+    const box = el.getBoundingClientRect()
+    return {
+      tag: el.tagName, id: el.id || null, role: el.getAttribute('role'),
+      label: el.getAttribute('aria-label'), classes: String(el.className || '').slice(0, 120),
+      tabindex: el.getAttribute('tabindex'), editable: el.isContentEditable,
+      width: Math.round(box.width), height: Math.round(box.height),
+    }
+  }
+  let active = document.activeElement
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+    active = active.shadowRoot.activeElement
+  }
+  // Primeiro o que dá para editar; os botões da página vêm só depois
+  const pick = (selector, limit) => [...document.querySelectorAll(selector)].slice(0, limit)
+  const editables = [...new Set([
+    ...pick('textarea, [contenteditable], [role=textbox], [role=grid], [role=gridcell]', 60),
+    ...pick('input', 40),
+    ...pick('[tabindex]:not(button):not([role=button]):not([role=tab]):not([role=menuitem])', 40),
+  ])].map(describe)
+  return {
+    visibility: document.visibilityState, hasFocus: document.hasFocus(),
+    active: describe(active), editables,
+  }
+}"""
+
+# Onde o cursor está, somando os iframes: "control" (botão, link, menu: uma tecla clicaria
+# nele), "ok" (algum elemento que recebe teclas) ou "nowhere" (solto na página)
+_FOCUS_STATE = """() => {
+  if (!document.hasFocus()) return 'unfocused'
+  let el = document.activeElement
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement
+  if (!el || el === document.body || el === document.documentElement) return 'nowhere'
+  if (el.tagName === 'IFRAME') return 'iframe'
+  const control = el.closest(
+    'button, a[href], select, summary, [role=button], [role=link], [role=menuitem], ' +
+    '[role=menuitemcheckbox], [role=menuitemradio], [role=tab], [role=option], ' +
+    '[role=checkbox], [role=radio], [role=switch]'
+  )
+  return control ? 'control' : 'ok'
+}"""
+# O site pode levar o cursor para a grade um instante depois do passo anterior
+_FOCUS_WAIT_SECONDS = 3.0
+
+
+def is_focused_target(targets: list[dict[str, Any]]) -> bool:
+    return bool(targets) and targets[0].get("focused") is True
+
+
 @dataclass
 class StepOutcome:
     status: str  # "ok", "needs_human" ou "failed"
@@ -79,6 +136,8 @@ class StepOutcome:
     options: list[dict[str, Any]] = field(default_factory=list)
     download: Download | None = None
     captured: str | list[dict[str, str]] | None = None
+    # Para investigar a falha: onde estava o cursor e o que dava para editar. Nunca valores
+    diagnostics: dict[str, Any] | None = None
 
 
 class StepRunner:
@@ -99,12 +158,10 @@ class StepRunner:
         self.downloads: list[Download] = []
         # Pedidos em andamento: o site ainda pode estar buscando o que vai mostrar
         self._pending_requests: set[Request] = set()
-        page.context.on("request", self._on_request)
-        page.context.on("requestfinished", self._on_request_done)
-        page.context.on("requestfailed", self._on_request_done)
-        for open_page in page.context.pages:
-            self._watch_downloads(open_page)
-        page.context.on("page", self._watch_downloads)
+        self._last_action: StepAction | None = None
+        # Escuta a aba e as que ela abrir, nunca o navegador todo: no Chrome da pessoa,
+        # as outras abas dela não podem segurar o passo nem virar download
+        self._watch(page)
 
     def _on_request(self, request: Request) -> None:
         if request.resource_type in _TRACKED_REQUESTS:
@@ -113,14 +170,22 @@ class StepRunner:
     def _on_request_done(self, request: Request) -> None:
         self._pending_requests.discard(request)
 
-    def _watch_downloads(self, page: Page) -> None:
+    def _watch(self, page: Page) -> None:
+        page.on("request", self._on_request)
+        page.on("requestfinished", self._on_request_done)
+        page.on("requestfailed", self._on_request_done)
         page.on("download", lambda download: self.downloads.append(download))
+        page.on("popup", self._watch)
 
     def run(self, plan: StepPlan) -> StepOutcome:
+        after_capture = self._last_action == StepAction.CAPTURE
+        self._last_action = plan.action
         if plan.action == StepAction.NAVIGATE:
             return self._navigate(plan)
         if plan.action == StepAction.CAPTURE:
-            return self._capture(plan)
+            return self._capture(plan, after_capture=after_capture)
+        if plan.action in _KEYBOARD_ACTIONS and is_focused_target(plan.targets):
+            return self._type_into_focus(plan)
         try:
             return self._climb_repair_ladder(plan)
         except _ValueNotAvailableError:
@@ -161,12 +226,26 @@ class StepRunner:
 
         return self._ask_human(plan, candidates)
 
-    def _capture(self, plan: StepPlan) -> StepOutcome:
+    def _capture(self, plan: StepPlan, *, after_capture: bool = False) -> StepOutcome:
         """Lê o dado. Sem camadas 2 e 3: um valor parecido com o certo é só um dado errado."""
-        # Um valor antigo na tela é pior do que nenhum: o site precisa ter terminado de responder
-        self._settle()
+        optional = bool(plan.postcondition.get("optional"))
+        # Um valor antigo na tela é pior do que nenhum: o site precisa ter terminado de responder.
+        # Os dados da tela final vêm em sequência, sem ação entre eles: a primeira espera vale para todos.
+        if not (optional and after_capture):
+            self._settle()
         read = capture.read_table if plan.capture_kind == CaptureKind.TABLE else capture.read_value
-        deadline = time.monotonic() + settings.element_wait_ms / 1000
+        if plan.postcondition.get("type") == postcondition.TEXT_STABLE:
+            captured = self._read_when_stable(plan, read)
+            if captured is not None:
+                return StepOutcome("ok", layer=1, captured=captured)
+            return StepOutcome(
+                "needs_human",
+                help_kind=HelpKind.UNCERTAIN,
+                message=f"O texto não parou de mudar a tempo para ser lido: {plan.intent}.",
+            )
+        # Dado guardado sozinho da tela final: a página já terminou de responder, e esperar
+        # por cada um que não veio desta vez deixaria a linha minutos parada
+        deadline = time.monotonic() + (0 if optional else settings.element_wait_ms / 1000)
         while True:
             for target in plan.targets:
                 captured = read(self.page, target)
@@ -184,11 +263,49 @@ class StepRunner:
             )
         if self._blocked_by_login(plan):
             return StepOutcome("needs_human", help_kind=HelpKind.UNCERTAIN, message=_LOGIN_MESSAGE)
+        if optional:
+            # Um par "rótulo: valor" que só aparece em alguns casos: fica vazio e a tarefa segue
+            empty: str | list[dict[str, str]] = [] if plan.capture_kind == CaptureKind.TABLE else ""
+            return StepOutcome("ok", layer=1, captured=empty)
         return StepOutcome(
             "needs_human",
             help_kind=HelpKind.UNCERTAIN,
             message=f"Não encontrei o dado desta captura na página: {plan.intent}.",
         )
+
+    def _read_when_stable(self, plan: StepPlan, read: Callable[[Page, dict[str, Any]], Any]) -> Any:
+        """Lê só quando o texto fica igual por alguns segundos e o site não mostra mais que está
+        trabalhando (por exemplo, o botão de parar a resposta de um chat)."""
+        rule = plan.postcondition
+        quiet = min(float(rule.get("quiet_seconds", 3)), 60)
+        deadline = time.monotonic() + min(float(rule.get("timeout_seconds", 120)), 600)
+        busy = rule.get("busy_css")
+        last: Any = None
+        since = time.monotonic()
+        while time.monotonic() < deadline:
+            value = next(
+                (
+                    found
+                    for target in plan.targets
+                    if (found := read(self.page, target)) is not None
+                ),
+                None,
+            )
+            now = time.monotonic()
+            if value != last:
+                last, since = value, now
+            elif value and now - since >= quiet and not self._is_busy(busy):
+                return value
+            self.page.wait_for_timeout(_POLL_MS * 2)
+        return None
+
+    def _is_busy(self, css: str | None) -> bool:
+        if not css:
+            return False
+        try:
+            return self.page.locator(css).first.is_visible()
+        except PlaywrightError:
+            return False
 
     def _navigate(self, plan: StepPlan) -> StepOutcome:
         host = (urlsplit(plan.url or "").hostname or "").lower()
@@ -414,14 +531,23 @@ class StepRunner:
             element.press(plan.value or "Enter")
 
     def _fill(self, element: Locator, value: str) -> None:
-        if not element.evaluate("el => el.isContentEditable"):
-            element.fill(value)
-            return
-        # Editores de texto só entendem teclas: é assim que criam cada linha
-        element.click()
-        self.page.keyboard.press("ControlOrMeta+A")
-        self.page.keyboard.press("Delete")
-        self.page.keyboard.type(value, delay=_TYPING_DELAY_MS)
+        kind = element.evaluate("el => el.isContentEditable ? 'editor' : el.tagName")
+        # Tab e Enter no texto viram as teclas: "B1 + Enter" na Caixa de Nome do Excel, por
+        # exemplo. Numa caixa de texto grande (textarea), a quebra de linha continua sendo texto
+        first, *rest = re.split(r"([\t\n])", value) if kind != "TEXTAREA" else [value]
+        if kind != "editor":
+            element.fill(first)
+        else:
+            # Editores de texto só entendem teclas: é assim que criam cada linha
+            element.click()
+            self.page.keyboard.press("ControlOrMeta+A")
+            self.page.keyboard.press("Delete")
+            self.page.keyboard.type(first, delay=_TYPING_DELAY_MS)
+        for piece in rest:
+            if piece in _KEYS_IN_TEXT:
+                self.page.keyboard.press(_KEYS_IN_TEXT[piece])
+            elif piece:
+                self.page.keyboard.type(piece, delay=_TYPING_DELAY_MS)
 
     def _select(self, element: Locator, value: str) -> None:
         try:
@@ -433,6 +559,79 @@ class StepRunner:
             element.select_option(value=value, timeout=_SELECT_BY_VALUE_WAIT_MS)
         except PlaywrightError as error:
             raise _ValueNotAvailableError from error
+
+    def _type_into_focus(self, plan: StepPlan) -> StepOutcome:
+        """Digita onde o cursor já está. Planilhas como o Excel Online desenham a grade como
+        imagem e recebem as teclas num editor escondido: não há campo para mirar."""
+        self._bring_to_front_if_hidden()
+        self._settle()
+        if plan.irreversible:
+            self.before_irreversible()
+        if plan.action == StepAction.FILL:
+            # Tab e quebra de linha no texto viram as teclas: numa planilha, andam de célula
+            pieces = [
+                (_KEYS_IN_TEXT.get(piece), piece)
+                for piece in re.split(r"([\t\n])", plan.value or "")
+                if piece
+            ]
+        else:
+            pieces = [(plan.value or "Enter", "")]
+        for key, text in pieces:
+            # Cada Tab pode levar o cursor para fora da grade: confere antes de cada tecla
+            state = self._wait_for_focus()
+            if state != "ok":
+                message = (
+                    "O cursor estava num botão, e não onde digitar. A linha parou para não "
+                    f"clicar em nada sem querer: {plan.intent}."
+                    if state == "control"
+                    else "O cursor não estava em nenhum lugar onde digitar, e o texto se "
+                    f"perderia. A linha parou: {plan.intent}."
+                )
+                return StepOutcome("failed", message=message, diagnostics=self._focus_report())
+            if key:
+                self.page.keyboard.press(key)
+            else:
+                self.page.keyboard.type(text, delay=_TYPING_DELAY_MS)
+        self._settle()
+        return StepOutcome("ok", layer=1)
+
+    def _bring_to_front_if_hidden(self) -> None:
+        """Numa aba escondida o Chrome pausa o desenho da página, e o Excel só leva o cursor
+        para a grade quando desenha. A aba do Ditto vem para a frente antes de digitar."""
+        try:
+            if self.page.evaluate("document.visibilityState") != "visible":
+                self.page.bring_to_front()
+                self.page.wait_for_timeout(_POLL_MS * 5)
+        except PlaywrightError:
+            pass
+
+    def _focus_state(self) -> str:
+        states = set()
+        for frame in self.page.frames:
+            try:
+                states.add(frame.evaluate(_FOCUS_STATE))
+            except PlaywrightError:
+                continue
+        if "control" in states:
+            return "control"
+        return "ok" if "ok" in states else "nowhere"
+
+    def _wait_for_focus(self) -> str:
+        deadline = time.monotonic() + _FOCUS_WAIT_SECONDS
+        state = self._focus_state()
+        while state == "nowhere" and time.monotonic() < deadline:
+            self.page.wait_for_timeout(_POLL_MS)
+            state = self._focus_state()
+        return state
+
+    def _focus_report(self) -> dict[str, Any]:
+        frames = []
+        for frame in self.page.frames:
+            try:
+                frames.append({"url": frame.url[:200], **frame.evaluate(_FOCUS_REPORT)})
+            except PlaywrightError:
+                frames.append({"url": frame.url[:200], "erro": "não deu para ler"})
+        return {"frames": frames}
 
     def _perform(self, element: Locator, plan: StepPlan) -> tuple[bool, Download | None]:
         before = postcondition.capture_state(self.page)

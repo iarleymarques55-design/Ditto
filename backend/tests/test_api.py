@@ -322,7 +322,7 @@ def test_arquivar_tira_da_lista_e_pausa_a_agenda(
     )
     assert criada.status_code == 201
 
-    assert api.delete(f"/api/v1/flows/{flow_id}", headers=autenticado).status_code == 204
+    assert api.post(f"/api/v1/flows/{flow_id}/archive", headers=autenticado).status_code == 204
     assert api.get("/api/v1/flows", headers=autenticado).json()["total"] == 0
     assert api.get(f"/api/v1/flows/{flow_id}", headers=autenticado).status_code == 404
     assert api.get("/api/v1/schedules", headers=autenticado).json()[0]["enabled"] is False

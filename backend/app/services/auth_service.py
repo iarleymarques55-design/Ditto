@@ -15,7 +15,7 @@ from app.core.exceptions import (
 )
 from app.core.rate_limit import rate_limiter
 from app.core.security import (
-    RECORDING_SCOPE,
+    RUNNER_SCOPE,
     create_access_token,
     decode_access_token,
     hash_password,
@@ -120,10 +120,17 @@ class AuthService:
             User(email=email, name=claims.get("name") or email, google_sub=claims["sub"])
         )
 
-    def get_user_from_token(self, token: str, *, allow_recording: bool = False) -> User:
+    def get_runner_user(self, token: str) -> User:
+        """Só o token do executor liga a extensão ao worker, nem o token de acesso comum."""
+        _, _, scope = decode_access_token(token)
+        if scope != RUNNER_SCOPE:
+            raise UnauthorizedError
+        return self.get_user_from_token(token, allowed_scope=RUNNER_SCOPE)
+
+    def get_user_from_token(self, token: str, *, allowed_scope: str | None = None) -> User:
         user_id, issued_at, scope = decode_access_token(token)
-        # O token da extensão só vale na rota que recebe gravações
-        if scope is not None and not (allow_recording and scope == RECORDING_SCOPE):
+        # Um token com escopo (os da extensão) só vale onde aquele escopo é aceito
+        if scope is not None and scope != allowed_scope:
             raise UnauthorizedError
         user = self.users.get_by_id(user_id)
         if user is None:

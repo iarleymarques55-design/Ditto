@@ -1,6 +1,6 @@
 # Ditto: extensão gravadora
 
-Grava uma tarefa feita no navegador e envia para o Ditto, que passa a repeti-la.
+Grava uma tarefa feita no navegador e envia para o Ditto, que passa a repeti-la. Também pode rodar as repetições neste Chrome, com as contas logadas nele ([executor](#executar-neste-chrome)).
 
 ## Instalar (modo de desenvolvimento)
 
@@ -12,8 +12,10 @@ Grava uma tarefa feita no navegador e envia para o Ditto, que passa a repeti-la.
 
 1. No painel do Ditto, clique em **Gravar tarefa**, dê um nome e informe o endereço inicial.
 2. Uma aba nova abre com a barra de gravação. Faça a tarefa normalmente.
-3. Para ler um valor da tela, clique em **Capturar dado**, depois no dado, e dê um nome a ele.
-4. Clique em **Parar e salvar**. A tarefa abre no painel, pronta para revisar.
+3. Os dados da tela final são guardados sozinhos ao clicar em **Parar e salvar**: tabelas com cabeçalho, fichas (`th` + `td`), pares `dt`/`dd`, textos "Rótulo: valor" e campos só de leitura com rótulo. Menu, cabeçalho e rodapé do site ficam de fora, assim como campos que a pessoa ainda pode editar e rótulos que aparecem mais de uma vez. Esses dados são opcionais: se um deles não aparecer em uma execução, fica vazio e a tarefa segue. O que não servir, remova na revisão do painel.
+   Para ler um valor de uma tela do meio do caminho, clique uma vez em **Capturar dados** e depois em cada dado que quiser guardar. Cada clique já fica salvo, com o nome do rótulo ao lado do dado (sem rótulo, vira "Dado 1", "Dado 2"…). Clicar no cabeçalho de uma tabela guarda a tabela inteira. **Pronto** ou Esc termina.
+4. Em planilhas do **Excel Online**, digite nas células normalmente. Cada célula vira dois passos que o Ditto consegue repetir: ir até a célula pela Caixa de Nome e escrever o valor na Barra de fórmulas. As células não viram perguntas no painel.
+5. Clique em **Parar e salvar**. A tarefa abre no painel, pronta para revisar.
 
 ## O que ela faz e o que não faz
 
@@ -27,9 +29,25 @@ Grava uma tarefa feita no navegador e envia para o Ditto, que passa a repeti-la.
 
 - Envio de arquivo para o site (`input type=file`) não é gravado.
 - Campos preenchidos pelo gerenciador de senhas sem nenhuma digitação podem não ser notados.
-- A repetição começa sem a sua sessão. Se o site pede login, saia da conta antes de gravar, para o login entrar na gravação.
+- No navegador do worker, a repetição começa sem a sua sessão. Se o site pede login, saia da conta antes de gravar, para o login entrar na gravação. Com o executor ligado, isso não é preciso: a repetição usa as contas deste Chrome.
 - Código por e-mail ou SMS e login pelo Google não funcionam na repetição.
 - Cliques só são reconhecidos em botões, links e elementos com a mãozinha do mouse. Confira na barra a linha "Anotado".
+
+## Executar neste Chrome
+
+Com o executor ligado, o worker roda as tarefas da sua conta aqui, em uma aba ao lado da que você está usando e com as contas que já estão logadas.
+
+1. No `.env` do backend, coloque `EXTENSION_RUNNER_PORT=8765` e reinicie o worker.
+2. No painel, abra a página da conta e clique em **Ligar neste Chrome**.
+3. O ícone da extensão mostra se o executor está ligado.
+
+Como funciona ([runner.js](runner.js)):
+
+- A extensão conecta em `ws://127.0.0.1:8765` com um token próprio, que dura 30 dias e não vale em nenhuma rota da API.
+- Cada linha abre uma aba ao lado da aba ativa, controlada com `chrome.debugger`. Só as abas abertas pelo Ditto, e as janelas que elas abrem, são controladas. Comandos para qualquer outra aba são recusados pela própria extensão.
+- Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". Clicar em **Cancelar** nela para a linha.
+- Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto copia o arquivo.
+- Precisa das permissões `debugger` (controlar as abas do Ditto) e `alarms` (tentar de novo quando o worker estava desligado).
 
 ## Publicar para outro endereço do painel
 

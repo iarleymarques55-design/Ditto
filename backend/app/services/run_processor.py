@@ -1,8 +1,10 @@
 """Liga o motor ao banco: percorre as linhas, registra tudo e decide quando parar."""
 
+import json
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Browser, Page
@@ -30,7 +32,7 @@ from app.repositories.credential_repository import CredentialRepository
 from app.repositories.run_repository import RunRepository
 from app.services import run_lifecycle, storage
 from app.services.email_service import send_email
-from app.services.engine.browser import host_matches, new_guarded_context
+from app.services.engine.browser import ItemTabs, host_matches
 from app.services.engine.executor import StepOutcome, StepPlan, StepRunner
 from app.services.engine.llm_repair import LlmRepairer
 from app.services.repair_service import save_new_version
@@ -128,13 +130,11 @@ class RunProcessor:
 
         started = time.monotonic()
         values = {**rule_values(self.flow.variables, self.run.timezone), **item.input}
-        context = new_guarded_context(self.browser, self.flow.allowed_domains)
+        tabs = ItemTabs(self.browser, self.flow.allowed_domains)
         try:
-            page = context.new_page()
-            runner = self._new_runner(page, item)
+            runner = self._new_runner(tabs.current, item)
             for step in self.steps:
-                # Um clique pode ter aberto outra janela: o próximo passo acontece nela
-                page = context.pages[-1] if context.pages else page
+                page = tabs.current
                 runner.page = page
                 if not self._run_step(page, runner, item, step, values):
                     return
@@ -151,7 +151,7 @@ class RunProcessor:
             run_lifecycle.fail_item(item, message)
             self._log_failure(item, message)
         finally:
-            context.close()
+            tabs.close()
 
     def _new_runner(self, page: Page, item: RunItem) -> StepRunner:
         def mark_irreversible() -> None:
@@ -191,6 +191,8 @@ class RunProcessor:
             return True
 
         self._screenshot(page, item)
+        if outcome.diagnostics:
+            self._save_diagnostics(item, outcome.diagnostics)
         item.problem_step_position = step.position
 
         # Depois de um passo sem volta a linha não pode recomeçar, então não adianta perguntar
@@ -367,6 +369,11 @@ class RunProcessor:
                 size_bytes=size,
             )
         )
+
+    def _save_diagnostics(self, item: RunItem, diagnostics: dict[str, Any]) -> None:
+        """Fica ao lado da tela da falha, só para investigar. Não aparece no painel."""
+        key = f"{self.run.owner_id}/{self.run.id}/.telas/linha-{item.position}-foco.json"
+        storage.save_bytes(key, json.dumps(diagnostics, ensure_ascii=False, indent=1).encode())
 
     def _screenshot(self, page: Page, item: RunItem) -> None:
         """Só para investigar problemas. Campos de senha saem cobertos."""

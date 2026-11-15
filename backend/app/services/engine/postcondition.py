@@ -17,6 +17,8 @@ URL_CONTAINS = "url_contains"
 TEXT_VISIBLE = "text_visible"
 FIELD_VALUE = "field_value"
 PAGE_CHANGED = "page_changed"
+# Em captura: só lê quando o texto parar de mudar, como a resposta de um chat sendo escrita
+TEXT_STABLE = "text_stable"
 
 VERIFIABLE_TYPES = {DOWNLOAD, URL_CONTAINS, TEXT_VISIBLE, FIELD_VALUE, PAGE_CHANGED}
 

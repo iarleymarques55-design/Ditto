@@ -124,13 +124,33 @@ _RESULTADO_DEMORA = """
 
 # O site mostra um texto que, se fosse tratado como HTML, rodaria um script
 _TEXTO_PERIGOSO = """
-<dl><dt>Situação</dt><dd>&lt;img src=x onerror="window.__invadido=1"&gt;</dd></dl>
+<dl><dt>&lt;img src=x onerror="window.__invadido=1"&gt;</dt><dd>ATIVA</dd></dl>
 """
 
 _VALOR_CURTO = """
 <dl><dt>Código</dt><dd>7</dd></dl>
 <label for="quantidade">Quantidade</label><input id="quantidade" name="quantidade" type="text">
 """
+
+# Tela final de uma consulta, com o que entra e o que não entra na captura automática
+_TELA_FINAL = """
+<nav><span>Usuário: Maria</span></nav>
+<h2>Notas emitidas</h2>
+<table id="notas"><thead><tr><th>Número</th><th>Valor</th></tr></thead>
+<tbody><tr><td>NF-1</td><td>R$ 10,00</td></tr><tr><td>NF-2</td><td>R$ 20,00</td></tr></tbody></table>
+<table id="ficha"><tr><th>CNPJ</th><td>12.345.678/0001-90</td></tr><tr><th>Porte</th><td>ME</td></tr></table>
+{protocolo}
+<p>Situação: ATIVA</p>
+<p>Horário 10:30</p>
+<pre>{"chave":"valor"}</pre>
+<label for="obs">Observação</label><input id="obs" value="digitado pela pessoa">
+<label for="pedido">Número do pedido</label><input id="pedido" readonly value="PED-5">
+<div><span>Endereço:</span><span>Rua A</span></div><div><span>Endereço:</span><span>Rua B</span></div>
+<div><span>Complemento:</span><span></span></div>
+<footer><span>Telefone: 0800</span></footer>
+"""
+_PROTOCOLO_DA_TELA_FINAL = '<div><span>Protocolo:</span><span id="protocolo">PROT-9</span></div>'
+_TELA_FINAL = _TELA_FINAL.replace("{protocolo}", _PROTOCOLO_DA_TELA_FINAL)
 
 _RESPOSTAS = {
     "111": "ATIVA",
@@ -153,6 +173,83 @@ def _consulta(cnpj: str, layout: str) -> str:
 <tbody><tr><td>NF-1</td><td>R$ 10,00</td></tr><tr><td>NF-2</td><td>R$ 20,00</td></tr></tbody></table>
 """
 
+
+# Imita o Excel Online: o app fica num iframe, a grade é um canvas, as teclas vão para um campo
+# escondido da grade, a Caixa de Nome solta o cursor depois do Enter e a Barra de fórmulas grava
+# na célula ativa. Os ids são os mesmos do Excel de verdade.
+_PLANILHA = """<iframe id="WacFrame_Excel_0" src="/planilha-app" style="width:760px;height:340px;border:0"></iframe>"""
+
+_PLANILHA_APP = """
+<input id="FormulaBar-NameBox-input" role="combobox" aria-label="Caixa de Nome" value="A1">
+<div id="formulaBarTextDivId_textElement" role="textbox" aria-label="formula bar" contenteditable="true"
+     style="display:inline-block;width:500px;min-height:20px;border:1px solid #999"></div>
+<canvas id="grade" width="640" height="200" style="display:block;cursor:cell"></canvas>
+<div id="gridKeyboardContentEditable_textElement" role="textbox" aria-label="grid" contenteditable="true"
+     tabindex="0" style="position:absolute;left:0;top:0;width:1px;height:1px;overflow:hidden;opacity:0"></div>
+<pre id="valores"></pre>
+<script>
+  const COLUNAS = 'ABCDEFGH'
+  const caixa = document.getElementById('FormulaBar-NameBox-input')
+  const barra = document.getElementById('formulaBarTextDivId_textElement')
+  const grade = document.getElementById('grade')
+  const sumidouro = document.getElementById('gridKeyboardContentEditable_textElement')
+  const celulas = {}
+  let coluna = 0
+  let linha = 1
+
+  const ativa = () => COLUNAS[coluna] + linha
+  const mostrar = () => {
+    caixa.value = ativa()
+    document.getElementById('valores').textContent = JSON.stringify(celulas)
+  }
+  const gravar = (texto) => {
+    if (!texto) return
+    celulas[ativa()] = texto
+    fetch('/planilha-gravou?celula=' + ativa() + '&valor=' + encodeURIComponent(texto))
+  }
+  const andar = (tecla) => {
+    if (tecla === 'Tab') coluna = Math.min(coluna + 1, COLUNAS.length - 1)
+    else linha += 1
+    mostrar()
+  }
+
+  grade.addEventListener('mousedown', (evento) => {
+    evento.preventDefault()
+    coluna = Math.min(Math.floor(evento.offsetX / 80), COLUNAS.length - 1)
+    linha = Math.floor(evento.offsetY / 20) + 1
+    mostrar()
+    sumidouro.focus()
+  })
+  sumidouro.addEventListener('keydown', (evento) => {
+    if (evento.key !== 'Enter' && evento.key !== 'Tab') return
+    evento.preventDefault()
+    gravar(sumidouro.innerText.trim())
+    sumidouro.innerText = ''
+    andar(evento.key)
+  })
+  barra.addEventListener('focus', () => { barra.innerText = celulas[ativa()] || '' })
+  barra.addEventListener('keydown', (evento) => {
+    if (evento.key !== 'Enter' && evento.key !== 'Tab') return
+    evento.preventDefault()
+    gravar(barra.innerText.trim())
+    barra.innerText = ''
+    barra.blur()
+    andar(evento.key)
+  })
+  caixa.addEventListener('keydown', (evento) => {
+    if (evento.key !== 'Enter') return
+    const alvo = /^([A-H])([1-9][0-9]*)$/.exec(caixa.value.trim().toUpperCase())
+    if (alvo) {
+      coluna = COLUNAS.indexOf(alvo[1])
+      linha = Number(alvo[2])
+    }
+    mostrar()
+    // Como o Excel quando controlado pela extensão: o cursor sai da planilha
+    caixa.blur()
+  })
+  mostrar()
+</script>
+"""
 
 _ERP = """
 <form action="/erp-salvo" method="get">
@@ -211,6 +308,9 @@ class Portal:
         self.requests: list[str] = []
         self.passwords_seen: list[str] = []
         self.login_ok = True
+        self.planilha: dict[str, str] = {}
+        # Um dado da tela final que some em algumas execuções
+        self.tela_final_sem_protocolo = False
         portal = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -253,12 +353,19 @@ class Portal:
                     "/resultado-demora": lambda: _RESULTADO_DEMORA,
                     "/texto-perigoso": lambda: _TEXTO_PERIGOSO,
                     "/valor-curto": lambda: _VALOR_CURTO,
+                    "/tela-final": lambda: (
+                        _TELA_FINAL.replace(_PROTOCOLO_DA_TELA_FINAL, "")
+                        if portal.tela_final_sem_protocolo
+                        else _TELA_FINAL
+                    ),
                     "/busca-com-formulario": lambda: _BUSCA_COM_FORMULARIO,
                     "/painel/tarefas/tarefa-gravada": lambda: "<h1>Tarefa no painel</h1>",
                     "/consulta": lambda: _consulta(
                         query.get("cnpj", [""])[0], portal.consulta_layout
                     ),
                     "/erp": lambda: _ERP,
+                    "/planilha": lambda: _PLANILHA,
+                    "/planilha-app": lambda: _PLANILHA_APP,
                     "/campos-sigilosos": lambda: _SIGILOSOS,
                     "/lenta": lambda: _LENTA,
                     "/abre-janela": lambda: _ABRE_JANELA,
@@ -272,6 +379,10 @@ class Portal:
                 if parts.path == "/api/total-filtrado":
                     time.sleep(0.8)
                     self._html("2")
+                elif parts.path == "/planilha-gravou":
+                    celula = query.get("celula", [""])[0]
+                    portal.planilha[celula] = query.get("valor", [""])[0]
+                    self._html("ok")
                 elif parts.path == "/erp-salvo":
                     portal.saved_values.extend(query.get("situacao", []))
                     self._html("<h1>Salvo</h1>")
@@ -341,3 +452,5 @@ class Portal:
         self.requests.clear()
         self.passwords_seen.clear()
         self.login_ok = True
+        self.planilha: dict[str, str] = {}
+        self.tela_final_sem_protocolo = False

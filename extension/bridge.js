@@ -1,5 +1,5 @@
 // Roda só nas páginas do painel (veja "matches" no manifest). É a ponte entre o painel e a extensão.
-const PEDIDOS_DO_PAINEL = ['ping', 'start']
+const PEDIDOS_DO_PAINEL = ['ping', 'start', 'connect-runner']
 
 // Marca a página antes de ela carregar: o painel sabe na hora se o gravador está instalado
 document.documentElement.dataset.dittoExtensao = chrome.runtime.getManifest().version

@@ -50,3 +50,19 @@ export async function iniciarGravacao({ nome, url }) {
   if (!resposta) throw new Error('A extensão não respondeu. Recarregue a página e tente de novo.')
   if (!resposta.ok) throw new Error(resposta.error)
 }
+
+// Estado do executor, que roda as tarefas neste Chrome: sem-token, conectando, conectado, desconectado ou recusado
+export async function statusDoExecutor() {
+  if (!extensaoInstalada()) return 'sem-extensao'
+  const resposta = await consultarExtensao()
+  return resposta?.ok ? (resposta.runner ?? 'sem-token') : 'sem-resposta'
+}
+
+export async function ligarExecutor() {
+  // Token próprio do executor: não vale em nenhuma rota da API, só para o worker reconhecer a conta
+  const { token } = await pedir('/auth/runner-token', { metodo: 'POST' })
+  const resposta = await falarComExtensao('connect-runner', { token })
+  if (!resposta) throw new Error('A extensão não respondeu. Recarregue a página e tente de novo.')
+  if (!resposta.ok) throw new Error(resposta.error)
+  return resposta.runner
+}

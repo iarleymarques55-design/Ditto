@@ -81,6 +81,8 @@ _FIND_VALUE = (
   // outro dado sem ninguém perceber, e um dado errado é pior que um pedido de ajuda.
   if (!anchor && target.css) {
     const matches = all(target.css);
+    // "index" escolhe qual ocorrência ler, como a 2ª resposta de um chat (-1 é a última)
+    if (Number.isInteger(target.index)) return valueOf(matches.at(target.index) || null);
     if (matches.length === 1) return valueOf(matches[0]);
   }
   return null;

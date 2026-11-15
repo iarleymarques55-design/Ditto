@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
@@ -21,7 +22,7 @@ from app.schemas.flow import (
     VariableAnswer,
     VariableResponse,
 )
-from app.services import presenters
+from app.services import presenters, storage
 from app.services.engine import postcondition
 from app.services.templating import safe_relative_path, slugify
 
@@ -50,6 +51,16 @@ def _is_username_field(steps: list[RecordedStep], index: int) -> bool:
     return following is not None and _is_sensitive(following)
 
 
+def _recorded_postcondition(recorded: RecordedStep) -> dict[str, Any]:
+    """O que a gravação já sabe sobre o resultado. Vazio deixa a análise escolher."""
+    if recorded.downloaded_extension:
+        return {"type": postcondition.DOWNLOAD, "extension": recorded.downloaded_extension}
+    if recorded.optional and recorded.action == StepAction.CAPTURE:
+        # Dado guardado sozinho da tela final: se faltar, fica vazio em vez de parar a tarefa
+        return {"type": postcondition.NONE, "optional": True}
+    return {}
+
+
 def _build_step(steps: list[RecordedStep], index: int) -> Step:
     recorded = steps[index]
     credential_field = None
@@ -73,16 +84,28 @@ def _build_step(steps: list[RecordedStep], index: int) -> Step:
         capture_kind=(recorded.capture_kind or CaptureKind.VALUE) if is_capture else None,
         url_template=recorded.url,
         credential_field=credential_field,
-        postcondition=(
-            {"type": postcondition.DOWNLOAD, "extension": recorded.downloaded_extension}
-            if recorded.downloaded_extension
-            else {}
-        ),
+        postcondition=_recorded_postcondition(recorded),
     )
     if recorded.target:
         target = recorded.target.model_dump(exclude_none=True, exclude_defaults=True)
+        if recorded.spreadsheet_part:
+            # Marca para a análise: célula de planilha não vira pergunta nem ganha nome da IA
+            target["spreadsheet"] = recorded.spreadsheet_part
         step.versions.append(StepVersion(version=1, target=target, source=VersionSource.RECORDING))
+    if recorded.spreadsheet_cell:
+        _describe_spreadsheet_step(step, recorded)
     return step
+
+
+def _describe_spreadsheet_step(step: Step, recorded: RecordedStep) -> None:
+    cell = recorded.spreadsheet_cell
+    if recorded.spreadsheet_part == "address":
+        step.intent = f"Ir para a célula {cell}"
+    else:
+        shown = (step.value_template or "").rstrip("\n")
+        step.intent = f'{cell}: escrever "{shown}"'[:300]
+    # Depois do Enter a Caixa de Nome e a Barra de fórmulas mudam: conferir o campo falharia
+    step.postcondition = {"type": postcondition.NONE}
 
 
 def _allowed_domains(payload: RecordingCreate) -> list[str]:
@@ -207,6 +230,39 @@ class FlowService:
         self.session.commit()
         return self._detail(flow)
 
+    def remove_capture(self, flow_id: uuid.UUID, step_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+        """Tira um dado capturado da tarefa. Só capturas: sem um clique, o resto não funcionaria."""
+        flow = self._get(flow_id, owner_id)
+        step = self.flows.get_step(step_id, flow.id)
+        if step is None:
+            raise NotFoundError("Este passo não foi encontrado.")
+        if step.action != StepAction.CAPTURE:
+            raise BusinessRuleError(
+                "Só dá para remover dados capturados. Os outros passos fazem a tarefa."
+            )
+        placeholder = f"{{{step.capture_key}}}"
+        if any(
+            placeholder in (other.value_template or "") for other in flow.steps if other is not step
+        ):
+            raise BusinessRuleError(
+                "Outro passo digita este dado. Ele precisa continuar sendo capturado."
+            )
+        # O worker está no meio de uma linha: a lista de passos não pode mudar debaixo dele
+        if self.runs.has_running_for_flow(flow.id):
+            raise ConflictError(
+                "Esta tarefa está rodando agora. Espere terminar para remover o dado."
+            )
+
+        removed_position = step.position
+        flow.steps.remove(step)
+        self.session.flush()
+        # Os números continuam em sequência; um de cada vez, porque a posição é única na tarefa
+        for later in sorted(flow.steps, key=lambda item: item.position):
+            if later.position > removed_position:
+                later.position -= 1
+                self.session.flush()
+        self.session.commit()
+
     def answer_variable(
         self,
         flow_id: uuid.UUID,
@@ -248,6 +304,21 @@ class FlowService:
         flow.status = FlowStatus.ACTIVE
         self.session.commit()
         return self._detail(flow)
+
+    def delete(self, flow_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+        """Apaga a tarefa e tudo o que é dela: passos, agenda, execuções e arquivos baixados."""
+        flow = self._get(flow_id, owner_id)
+        # O worker está no meio de uma linha: apagar agora derrubaria a execução sem aviso
+        if self.runs.has_running_for_flow(flow.id):
+            raise ConflictError(
+                "Esta tarefa está rodando agora. Cancele a execução antes de excluir."
+            )
+        run_ids = self.runs.ids_for_flow(flow.id)
+        # O banco apaga em cascata passos, versões, agenda, execuções e pedidos de ajuda
+        self.session.delete(flow)
+        self.session.commit()
+        for run_id in run_ids:
+            storage.delete_tree(f"{owner_id}/{run_id}")
 
     def archive(self, flow_id: uuid.UUID, owner_id: uuid.UUID) -> None:
         flow = self._get(flow_id, owner_id)

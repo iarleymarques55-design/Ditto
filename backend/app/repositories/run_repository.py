@@ -160,14 +160,20 @@ class RunRepository:
 
     # Daqui para baixo, só o worker usa
 
-    def claim_queued(self) -> Run | None:
+    def ids_for_flow(self, flow_id: uuid.UUID) -> list[uuid.UUID]:
+        return list(self.session.scalars(select(Run.id).where(Run.flow_id == flow_id)))
+
+    def has_running_for_flow(self, flow_id: uuid.UUID) -> bool:
+        running = select(Run.id).where(Run.flow_id == flow_id, Run.status == RunStatus.RUNNING)
+        return self.session.scalar(running.limit(1)) is not None
+
+    def claim_queued(self, owner_id: uuid.UUID | None = None) -> Run | None:
         """SKIP LOCKED: dois workers nunca pegam a mesma execução."""
+        query = select(Run).where(Run.status == RunStatus.QUEUED)
+        if owner_id is not None:
+            query = query.where(Run.owner_id == owner_id)
         return self.session.scalar(
-            select(Run)
-            .where(Run.status == RunStatus.QUEUED)
-            .order_by(Run.created_at)
-            .limit(1)
-            .with_for_update(skip_locked=True)
+            query.order_by(Run.created_at).limit(1).with_for_update(skip_locked=True)
         )
 
     def list_stale(self, older_than: datetime) -> list[Run]:

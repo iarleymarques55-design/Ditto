@@ -8,6 +8,7 @@ import { TabelaExecucoes, useExecucoes } from '../../execucoes/index.js'
 import { arquivarFluxo, ativarFluxo } from '../api.js'
 import AcessoPortal from '../components/AcessoPortal.jsx'
 import AgendaFluxo from '../components/AgendaFluxo.jsx'
+import ExcluirTarefa from '../components/ExcluirTarefa.jsx'
 import ListaPassos from '../components/ListaPassos.jsx'
 import VariaveisFluxo from '../components/VariaveisFluxo.jsx'
 import { useFluxo } from '../hooks/useFluxo.js'
@@ -155,9 +156,12 @@ function Detalhe({ fluxo, aoMudar }) {
       </section>
 
       <div className="mt-10">
-        <Botao variante="discreto" onClick={arquivar}>
-          Arquivar esta tarefa
-        </Botao>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          <Botao variante="discreto" onClick={arquivar}>
+            Arquivar esta tarefa
+          </Botao>
+          <ExcluirTarefa fluxo={fluxo} />
+        </div>
         {erroArquivar && (
           <p role="alert" className="mt-1 text-[14px] font-medium text-rec-texto">
             {erroArquivar}

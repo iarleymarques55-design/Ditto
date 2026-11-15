@@ -1,4 +1,6 @@
 // Guarda a gravação. O Chrome desliga este arquivo quando fica ocioso, por isso tudo vai para o storage.
+// O executor, que roda as tarefas neste Chrome, fica em runner.js.
+importScripts('runner.js')
 
 const CHAVE = 'gravacao'
 const MAX_PASSOS = 200
@@ -49,6 +51,9 @@ function hostDe(url) {
 const NOME_MAXIMO = 40
 
 function descreverPasso(passo) {
+  if (passo.spreadsheet_part === 'value') {
+    return `${passo.spreadsheet_cell}: "${(passo.value ?? '').trim().slice(0, NOME_MAXIMO)}"`
+  }
   const alvo = passo.target ?? {}
   const nome = (passo.capture_name ?? alvo.text ?? alvo.label ?? alvo.placeholder ?? alvo.name ?? 'elemento').slice(0, NOME_MAXIMO)
   const descricoes = {
@@ -129,6 +134,110 @@ async function iniciar(mensagem) {
     picking: false,
   })
   return { ok: true }
+}
+
+// A mesma chave que a API dá ao nome (templating.slugify): "Situação" e "situacao" são o mesmo dado
+function chaveDoNome(nome) {
+  const chave = nome
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+  return chave || 'campo'
+}
+
+// Nome sem repetir: "Total", "Total 2"... Sem rótulo nenhum, "Dado 1", "Dado 2".
+// A chave só tem 40 letras: o número precisa caber nela, ou dois nomes longos virariam um só.
+function nomeUnico(base, usados) {
+  const chaves = new Set(usados.map(chaveDoNome))
+  if (!chaves.has(chaveDoNome(base))) return base
+  for (let numero = 2; ; numero++) {
+    const nome = `${base.slice(0, 34).trim()} ${numero}`
+    if (!chaves.has(chaveDoNome(nome))) return nome
+  }
+}
+
+// O que identifica um dado é o rótulo ao redor dele; o CSS só decide quando não há rótulo
+function mesmoDado(a, b) {
+  if (a?.anchor || b?.anchor) {
+    return a?.anchor === b?.anchor && a?.anchor_kind === b?.anchor_kind && a?.row_index === b?.row_index
+  }
+  if (a?.tag === 'table' || b?.tag === 'table') return a?.css === b?.css && a?.tag === b?.tag
+  return Boolean(a?.css) && a.css === b?.css
+}
+
+function capturarDado(estado, pick) {
+  if (pick?.recusado) {
+    estado.warning = pick.recusado
+    return
+  }
+  const tabela = pick.wholeTable && pick.table
+  const alvo = tabela ? pick.table.target : pick.target
+  const repetido = estado.steps.some((passo) => passo.action === 'capture' && mesmoDado(passo.target, alvo))
+  if (repetido) {
+    estado.warning = 'Este dado já foi guardado.'
+    return
+  }
+  estado.warning = pick.hasAnchor || tabela ? null : 'Não achei um rótulo perto deste dado. Se o site mudar, o Ditto pode não encontrá-lo.'
+  adicionarPasso(estado, passoDeCaptura(estado, pick))
+}
+
+function passoDeCaptura(estado, pick) {
+  const tabela = pick.wholeTable && pick.table
+  const usados = Object.keys(estado.examples)
+  const sugerido = (tabela ? pick.tableName || 'Tabela' : pick.suggestedName || '').trim()
+  const base = sugerido || `Dado ${usados.length + 1}`
+  return {
+    action: 'capture',
+    capture_name: nomeUnico(base.slice(0, 120), usados),
+    capture_kind: tabela ? 'table' : 'value',
+    target: tabela ? pick.table.target : pick.target,
+    example: tabela ? '' : (pick.preview ?? ''),
+  }
+}
+
+// Tela final: o que a pessoa vê ao clicar em "Parar e salvar"
+const LIMITE_DA_LEITURA_MS = 5000
+
+async function lerTelaFinal(tabId) {
+  try {
+    const resultados = await comLimite(
+      chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: () => globalThis.__dittoVarrerTela?.() ?? [],
+      }),
+      LIMITE_DA_LEITURA_MS,
+    )
+    // A página principal primeiro, depois os iframes
+    return resultados
+      .sort((a, b) => (a.frameId === 0 ? -1 : b.frameId === 0 ? 1 : 0))
+      .flatMap((resultado) => (Array.isArray(resultado.result) ? resultado.result : []))
+  } catch {
+    // Página que não aceita scripts ou que travou: a gravação é salva sem os dados da tela
+    return []
+  }
+}
+
+// Os dados da tela final entram como opcionais: se um deles não aparecer em uma execução,
+// fica vazio e a tarefa segue, em vez de parar para pedir ajuda
+function capturarTelaFinal(estado, picks) {
+  for (const pick of picks) {
+    if (estado.steps.length >= MAX_PASSOS) return
+    if (!pick || pick.recusado || !(pick.hasAnchor || (pick.wholeTable && pick.table))) continue
+    const passo = passoDeCaptura(estado, pick)
+    if (estado.steps.some((outro) => outro.action === 'capture' && mesmoDado(outro.target, passo.target))) continue
+    adicionarPasso(estado, { ...passo, optional: true })
+  }
+}
+
+// Uma tentativa anterior de salvar que falhou já leu a tela: lê de novo, porque ela pode ter mudado
+function tirarDadosDaTela(estado) {
+  for (const passo of estado.steps) {
+    if (passo.optional) delete estado.examples[passo.capture_name]
+  }
+  estado.steps = estado.steps.filter((passo) => !passo.optional)
 }
 
 function mesmoAlvo(a, b) {
@@ -220,9 +329,16 @@ async function falhar(estado, mensagem) {
   return { ok: false, error: mensagem }
 }
 
-async function parar() {
+async function parar(abaDoPedido) {
   const estado = await lerEstado()
   if (!estado) return { ok: false, error: 'Nenhuma gravação em andamento.' }
+
+  // Pela barra, a aba é a que a pessoa está vendo; pelo ícone do Ditto, a última que teve ação
+  const candidatas = [abaDoPedido, estado.lastTabId, estado.tabIds[0]]
+  const aba = candidatas.find((tabId) => estado.tabIds.includes(tabId))
+  tirarDadosDaTela(estado)
+  capturarTelaFinal(estado, await lerTelaFinal(aba))
+
   if (estado.steps.length < 2) return falhar(estado, 'Nada foi gravado ainda. Faça a tarefa antes de salvar.')
   return enviar(estado)
 }
@@ -246,6 +362,7 @@ async function tratarDaAba(mensagem, remetente) {
     case 'ditto:hello':
       return resumo(estado)
     case 'ditto:step':
+      estado.lastTabId = tabId
       adicionarPasso(estado, mensagem.step)
       await salvarEstado(estado)
       await avisarAbas(estado)
@@ -270,11 +387,9 @@ async function tratarDaAba(mensagem, remetente) {
       return { ok: true }
     }
     case 'ditto:picked':
-      estado.picking = false
+      // A escolha continua ligada: cada clique já é um dado salvo, sem formulário
+      capturarDado(estado, mensagem.pick)
       await salvarEstado(estado)
-      chrome.tabs.sendMessage(tabId, { type: 'ditto:pick-stop' }).catch(() => {})
-      // O formulário para dar nome ao dado fica na barra, no topo da página
-      chrome.tabs.sendMessage(tabId, { type: 'ditto:picked', pick: mensagem.pick }, { frameId: 0 }).catch(() => {})
       await avisarAbas(estado)
       return { ok: true }
     default:
@@ -286,7 +401,7 @@ function aoReceber(mensagem, remetente) {
   if (remetente.id !== chrome.runtime.id) return Promise.resolve({ ok: false })
 
   // O painel só fala pela ponte, que só existe nas origens do manifest
-  if (['ditto:ping', 'ditto:start'].includes(mensagem.type)) {
+  if (['ditto:ping', 'ditto:start', 'ditto:connect-runner'].includes(mensagem.type)) {
     if (!origensDoPainel().includes(new URL(remetente.url).origin)) {
       return Promise.resolve({ ok: false, error: 'Origem não autorizada.' })
     }
@@ -294,14 +409,23 @@ function aoReceber(mensagem, remetente) {
       return enfileirar(async () => ({
         ok: true,
         version: chrome.runtime.getManifest().version,
+        runner: statusDoExecutor(),
         ...resumo(await lerEstado()),
       }))
+    }
+    if (mensagem.type === 'ditto:connect-runner') {
+      if (typeof mensagem.token !== 'string' || !mensagem.token) {
+        return Promise.resolve({ ok: false, error: 'Token do executor ausente.' })
+      }
+      return salvarTokenDoExecutor(mensagem.token).then(() => ({ ok: true, runner: statusDoExecutor() }))
     }
     return enfileirar(() => iniciar(mensagem))
   }
 
-  if (mensagem.type === 'ditto:status') return enfileirar(async () => resumo(await lerEstado()))
-  if (mensagem.type === 'ditto:stop') return enfileirar(parar, LIMITE_DO_ENVIO_MS)
+  if (mensagem.type === 'ditto:status') {
+    return enfileirar(async () => ({ ...resumo(await lerEstado()), runner: statusDoExecutor() }))
+  }
+  if (mensagem.type === 'ditto:stop') return enfileirar(() => parar(remetente.tab?.id), LIMITE_DO_ENVIO_MS)
   if (mensagem.type === 'ditto:discard') return enfileirar(descartar)
   return enfileirar(() => tratarDaAba(mensagem, remetente))
 }

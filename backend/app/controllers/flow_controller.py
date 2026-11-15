@@ -83,6 +83,21 @@ def update_flow(
 @router.delete(
     "/{flow_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    summary="Excluir uma tarefa",
+    description=(
+        "Apaga a tarefa para sempre, com passos, agenda, execuções e arquivos baixados. "
+        "Recusada enquanto uma execução dela estiver rodando: cancele antes. "
+        "Para só tirar da lista e guardar o histórico, use `POST /flows/{flow_id}/archive`."
+    ),
+    responses={**NOT_FOUND_RESPONSE, **CONFLICT_RESPONSE},
+)
+def delete_flow(flow_id: FlowId, user: CurrentUser, session: DbSession) -> None:
+    FlowService(session).delete(flow_id, user.id)
+
+
+@router.post(
+    "/{flow_id}/archive",
+    status_code=status.HTTP_204_NO_CONTENT,
     summary="Arquivar uma tarefa",
     description="Tira a tarefa da lista e pausa a agenda. O histórico de execuções continua guardado.",
     responses=NOT_FOUND_RESPONSE,
@@ -106,6 +121,27 @@ def update_step(
     session: DbSession,
 ) -> FlowDetail:
     return FlowService(session).update_step(flow_id, step_id, user.id, payload)
+
+
+@router.delete(
+    "/{flow_id}/steps/{step_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remover um dado capturado",
+    description=(
+        "Tira da tarefa um passo de captura que a pessoa não quer no Excel, como um dado da tela "
+        "final guardado sozinho pela gravação. Os passos seguintes sobem uma posição. "
+        "Recusada para passos que não são captura, para um dado que outro passo digita e "
+        "enquanto uma execução da tarefa estiver rodando."
+    ),
+    responses={**NOT_FOUND_RESPONSE, **RULE_RESPONSE, **CONFLICT_RESPONSE},
+)
+def remove_capture(
+    flow_id: FlowId,
+    step_id: Annotated[uuid.UUID, Path(description="Identificador do passo de captura.")],
+    user: CurrentUser,
+    session: DbSession,
+) -> None:
+    FlowService(session).remove_capture(flow_id, step_id, user.id)
 
 
 @router.post(
