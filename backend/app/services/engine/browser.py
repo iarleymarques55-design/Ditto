@@ -1,6 +1,7 @@
 """Navegador do worker. Abre sites a pedido do usuário, então é o ponto mais exposto do sistema."""
 
 import weakref
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Browser, BrowserContext, Dialog, Page, Playwright, Request, Route
@@ -76,25 +77,34 @@ def is_user_browser(browser: Browser) -> bool:
     return browser in _user_browsers
 
 
-def _guard(route: Route, allowed_domains: list[str]) -> None:
+def _guard(
+    route: Route,
+    allowed_domains: list[str],
+    on_blocked: Callable[[str], None] | None = None,
+) -> None:
     request = route.request
+    is_navigation = _is_top_level_navigation(request)
     allowed = is_request_allowed(
-        request.url,
-        is_navigation=_is_top_level_navigation(request),
-        allowed_domains=allowed_domains,
+        request.url, is_navigation=is_navigation, allowed_domains=allowed_domains
     )
     if allowed:
         route.continue_()
-    else:
-        route.abort("blockedbyclient")
+        return
+    route.abort("blockedbyclient")
+    if is_navigation and on_blocked is not None:
+        on_blocked(request.url)
 
 
-def new_guarded_context(browser: Browser, allowed_domains: list[str]) -> BrowserContext:
+def new_guarded_context(
+    browser: Browser,
+    allowed_domains: list[str],
+    on_blocked: Callable[[str], None] | None = None,
+) -> BrowserContext:
     """Contexto limpo por item, sem sessão compartilhada e com a navegação filtrada."""
     # Service worker responderia direto à página, sem passar pelo filtro
     context = browser.new_context(accept_downloads=True, service_workers="block", locale="pt-BR")
     context.set_default_timeout(settings.step_timeout_ms)
-    context.route("**/*", lambda route: _guard(route, allowed_domains))
+    context.route("**/*", lambda route: _guard(route, allowed_domains, on_blocked))
     context.on("page", lambda page: page.on("dialog", _answer_dialog))
     return context
 
@@ -104,14 +114,21 @@ class ItemTabs:
     pessoa, uma aba nova ao lado das outras, com as contas dela; no fim, só as abas do Ditto
     fecham."""
 
-    def __init__(self, browser: Browser, allowed_domains: list[str]) -> None:
+    def __init__(
+        self,
+        browser: Browser,
+        allowed_domains: list[str],
+        on_blocked: Callable[[str], None] | None = None,
+    ) -> None:
+        # A lista é lida a cada pedido: quem criou pode liberar um domínio novo no meio
         self._allowed_domains = allowed_domains
+        self._on_blocked = on_blocked
         self._pages: list[Page] = []
         self._context: BrowserContext | None = None
         if is_user_browser(browser):
             self._adopt(browser.contexts[0].new_page())
         else:
-            self._context = new_guarded_context(browser, allowed_domains)
+            self._context = new_guarded_context(browser, allowed_domains, on_blocked)
             self._context.on("page", lambda page: self._pages.append(page))
             self._context.new_page()
 
@@ -124,7 +141,7 @@ class ItemTabs:
     def _adopt(self, page: Page) -> None:
         # O filtro fica na aba, e não no Chrome inteiro, para não tocar nas abas da pessoa
         page.set_default_timeout(settings.step_timeout_ms)
-        page.route("**/*", lambda route: _guard(route, self._allowed_domains))
+        page.route("**/*", lambda route: _guard(route, self._allowed_domains, self._on_blocked))
         page.on("dialog", _answer_dialog)
         page.on("popup", self._adopt)
         self._pages.append(page)
@@ -134,6 +151,8 @@ class ItemTabs:
             url, is_navigation=True, allowed_domains=self._allowed_domains
         ):
             page.close()
+            if self._on_blocked is not None:
+                self._on_blocked(url)
 
     def close(self) -> None:
         if self._context is not None:

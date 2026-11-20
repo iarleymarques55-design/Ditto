@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_max_calls_per_run: int = 5
     llm_timeout_seconds: float = 30.0
+    # Criar tarefa com IA: limite de passos e quanto esperar a pessoa responder uma dúvida
+    ai_draft_max_steps: int = 40
+    ai_draft_answer_timeout_seconds: int = 600
 
     brevo_api_key: SecretStr | None = None
     email_from: str | None = None

@@ -1,3 +1,4 @@
+from app.models.ai_draft import AiDraft
 from app.models.base import Base
 from app.models.credential import Credential
 from app.models.flow import Flow, Step, StepVersion, Variable
@@ -7,6 +8,7 @@ from app.models.schedule import Schedule
 from app.models.user import User
 
 __all__ = [
+    "AiDraft",
     "Artifact",
     "Base",
     "Credential",

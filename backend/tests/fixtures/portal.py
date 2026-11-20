@@ -369,6 +369,11 @@ class Portal:
                     "/campos-sigilosos": lambda: _SIGILOSOS,
                     "/lenta": lambda: _LENTA,
                     "/abre-janela": lambda: _ABRE_JANELA,
+                    # Aba nova em outro endereço, como o Excel Online abrindo uma pasta nova
+                    "/abre-outro-site": lambda: (
+                        f'<a id="outro" href="http://127.0.0.1:{portal.port}/consulta?cnpj=111" '
+                        'target="_blank">Abrir em outro site</a>'
+                    ),
                     "/com-iframe": lambda: _COM_IFRAME,
                     "/dentro-do-iframe": lambda: _DENTRO_DO_IFRAME,
                     "/dialogo-comum": lambda: _dialogo("Deseja continuar?"),

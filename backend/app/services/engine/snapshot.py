@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import Locator, Page
+from playwright.sync_api import Frame, Locator, Page
 
 MARKER_ATTRIBUTE = "data-ditto-id"
 
@@ -135,6 +135,32 @@ class PageElement:
 
 def take_snapshot(page: Page) -> list[PageElement]:
     return [PageElement(**item) for item in page.evaluate(_COLLECT_ELEMENTS)]
+
+
+MAX_ELEMENTS_ALL_FRAMES = 400
+
+
+def take_snapshot_with_frames(page: Page) -> list[tuple[PageElement, Frame, int]]:
+    """Os elementos da página e dos iframes, como o Excel Online, que desenha tudo dentro de um.
+    Cada um sai com o frame e o número local da marca, e um índice único entre todos."""
+    found: list[tuple[PageElement, Frame, int]] = []
+    for frame in page.frames:
+        try:
+            raw = frame.evaluate(_COLLECT_ELEMENTS)
+        except PlaywrightError:
+            # Frame que navegou ou fechou no meio da leitura
+            continue
+        for item in raw:
+            local = item["index"]
+            element = PageElement(**{**item, "index": len(found)})
+            found.append((element, frame, local))
+            if len(found) >= MAX_ELEMENTS_ALL_FRAMES:
+                return found
+    return found
+
+
+def frame_locator_for(frame: Frame, local_index: int) -> Locator:
+    return frame.locator(f'[{MARKER_ATTRIBUTE}="{local_index}"]')
 
 
 def locator_for(page: Page, element: PageElement) -> Locator:

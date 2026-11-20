@@ -17,7 +17,9 @@ from app.services.engine.extension_relay import ExtensionRelay
 from app.services.worker_tasks import (
     analyze_next_flow,
     expire_help_requests,
+    fail_stale_drafts,
     fire_due_schedules,
+    process_next_draft,
     process_next_run,
     purge_expired_artifacts,
     recover_stale_runs,
@@ -107,6 +109,7 @@ def main() -> None:
                         with SessionLocal() as session:
                             recover_stale_runs(session)
                             expire_help_requests(session)
+                            fail_stale_drafts(session)
                         last_maintenance = now
                     if now - last_purge >= _PURGE_SECONDS:
                         with SessionLocal() as session:
@@ -122,6 +125,8 @@ def main() -> None:
                         worked = (
                             process_next_run(SessionLocal, current, owner_id=owner_id) or worked
                         )
+                        if owner_id is not None:
+                            worked = process_next_draft(SessionLocal, current, owner_id) or worked
                 except Exception:
                     # O banco pode ter caído por um instante: tenta de novo na próxima volta
                     logger.exception("Erro na volta do worker")

@@ -11,14 +11,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import DomainError
-from app.models.enums import HelpStatus, ItemStatus, LogLevel, RunStatus, RunTrigger
+from app.models.enums import AiDraftStatus, HelpStatus, ItemStatus, LogLevel, RunStatus, RunTrigger
 from app.models.run import Run
+from app.repositories.ai_draft_repository import AiDraftRepository
 from app.repositories.flow_repository import FlowRepository
 from app.repositories.repair_repository import RepairRepository
 from app.repositories.run_repository import RunRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.services import run_lifecycle, storage
+from app.services.ai_explorer import AiExplorer, claim_next_draft
 from app.services.analyzer import analyze_flow
+from app.services.engine.llm_explorer import LlmExplorer
 from app.services.engine.llm_repair import LlmRepairer
 from app.services.llm_client import LlmClient
 from app.services.run_processor import RunProcessor, items_of, requeue_item_after_crash
@@ -51,6 +54,41 @@ def recover_stale_runs(session: Session) -> int:
         )
     session.commit()
     return len(stale)
+
+
+def fail_stale_drafts(session: Session) -> int:
+    """Um rascunho sem sinal do worker não volta para a fila: a aba que a IA usava já se perdeu."""
+    limit = datetime.now(UTC) - timedelta(minutes=settings.stale_run_minutes)
+    count = AiDraftRepository(session).fail_stale(
+        limit, "O worker parou no meio. Peça de novo para a IA criar a tarefa."
+    )
+    session.commit()
+    return count
+
+
+def process_next_draft(
+    session_factory: Callable[[], Session],
+    browser: Browser,
+    owner_id: uuid.UUID,
+    explorer: LlmExplorer | None = None,
+) -> bool:
+    """A IA só monta tarefas no Chrome da pessoa, e só as da conta que ligou a extensão."""
+    with session_factory() as session:
+        draft = claim_next_draft(session, owner_id)
+        if draft is None:
+            return False
+        try:
+            AiExplorer(session, draft, browser, explorer).run()
+        except Exception:
+            # Para o rascunho, nunca o worker
+            logger.exception("Falha inesperada no rascunho %s", draft.id)
+            session.rollback()
+            AiDraftRepository(session).update_if_open(
+                draft.id,
+                {"status": AiDraftStatus.FAILED, "error": "Erro interno ao montar a tarefa.", "question": None},
+            )
+            session.commit()
+    return True
 
 
 def expire_help_requests(session: Session) -> int:

@@ -92,6 +92,15 @@ class HelpKind(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class AiDraftStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_ANSWER = "waiting_answer"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
 class HelpStatus(StrEnum):
     OPEN = "open"
     ANSWERED = "answered"

@@ -2,24 +2,12 @@ import { useId, useState } from 'react'
 import RecordIcon from '../../../components/landing/RecordIcon.jsx'
 import Botao from '../../../components/ui/Botao.jsx'
 import Modal from '../../../components/ui/Modal.jsx'
+import { normalizarEndereco } from '../../../lib/endereco.js'
 import { consultarExtensao, extensaoInstalada, iniciarGravacao } from '../extensao.js'
 
 const classeCampo = 'mt-1 min-h-11 w-full rounded-[2px] border border-grafite/60 bg-papel-folha px-3 text-[15px] text-navy'
 const classeTitulo = 'font-display text-[26px] leading-tight font-bold text-navy'
 const classeTexto = 'mt-3 text-[15px] leading-relaxed text-grafite'
-
-function normalizarEndereco(texto) {
-  const limpo = texto.trim()
-  const comProtocolo = /^[a-z][a-z0-9+.-]*:\/\//i.test(limpo) ? limpo : `https://${limpo}`
-  try {
-    const url = new URL(comProtocolo)
-    const protocoloValido = ['http:', 'https:'].includes(url.protocol)
-    const hostValido = url.hostname.includes('.') || url.hostname === 'localhost'
-    return protocoloValido && hostValido ? url.href : null
-  } catch {
-    return null
-  }
-}
 
 function SemExtensao({ idTitulo, aoFechar }) {
   return (

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.controllers.account_controller import router as account_router
+from app.controllers.ai_draft_controller import router as ai_draft_router
 from app.controllers.auth_controller import router as auth_router
 from app.controllers.credential_controller import router as credential_router
 from app.controllers.dashboard_controller import router as dashboard_router
@@ -32,6 +33,10 @@ _OPENAPI_TAGS = [
     {"name": "Tarefas", "description": "Gravações, passos, variáveis e ativação."},
     {"name": "Execuções", "description": "Disparar, acompanhar e baixar o resultado das cópias."},
     {"name": "Reparos", "description": "Caminhos que mudaram e decisões que esperam uma pessoa."},
+    {
+        "name": "Criar com IA",
+        "description": "Escreva o que a tarefa faz e a IA monta os passos no seu Chrome.",
+    },
     {"name": "Acessos", "description": "Senhas dos portais, guardadas com criptografia."},
     {"name": "Agendas", "description": "Tarefas que rodam sozinhas no horário certo."},
 ]
@@ -83,6 +88,7 @@ def create_app(app_settings: Settings = settings) -> FastAPI:
         account_router,
         dashboard_router,
         flow_router,
+        ai_draft_router,
         run_router,
         repair_router,
         credential_router,
