@@ -4,6 +4,7 @@ import Botao from '../components/ui/Botao.jsx'
 import EstadoVazio from '../components/ui/EstadoVazio.jsx'
 import { useAuth } from '../features/auth/index.js'
 import { AtalhoConta, ContaPage } from '../features/conta/index.js'
+import { CriarComIa, PedidoIaPage } from '../features/criar-com-ia/index.js'
 import { DashboardPage } from '../features/dashboard/index.js'
 import { ExecucaoDetalhePage, ExecucoesPage, NovaExecucaoPage } from '../features/execucoes/index.js'
 import { FluxoDetalhePage, FluxosPage, GravarTarefa } from '../features/fluxos/index.js'
@@ -29,13 +30,19 @@ function Painel() {
           <LayoutPainel
             pedidosPendentes={pedidos?.length ?? 0}
             perfil={<AtalhoConta />}
-            acaoPrincipal={<GravarTarefa />}
+            acaoPrincipal={
+              <>
+                <CriarComIa />
+                <GravarTarefa />
+              </>
+            }
             aoSair={sair}
           />
         }
       >
         <Route index element={<DashboardPage />} />
         <Route path="tarefas" element={<FluxosPage />} />
+        <Route path="tarefas/ia/:id" element={<PedidoIaPage />} />
         <Route path="tarefas/:id" element={<FluxoDetalhePage />} />
         <Route path="execucoes" element={<ExecucoesPage />} />
         <Route path="execucoes/nova" element={<NovaExecucaoPage />} />

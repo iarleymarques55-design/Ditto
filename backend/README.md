@@ -104,6 +104,25 @@ flowchart LR
 
 A [extensão](../extension/README.md) observa a tarefa e envia para `POST /api/v1/flows` os passos com a impressão digital de cada elemento. Ela usa um token próprio, pedido em `POST /auth/recording-token`: dura 2 horas e só serve para essa rota. O backend não confia no envio: valor de campo de senha é descartado, e o campo de texto logo antes dele é tratado como usuário de login. Os dois passam a usar uma credencial salva.
 
+### 1b. Ou descrever, e a IA grava
+
+Em vez de gravar, a pessoa escreve o que a tarefa faz, como *"pesquise o CNPJ 111 e guarde a situação"*. O pedido entra por `POST /api/v1/ai-drafts` e o worker abre uma aba no Chrome ligado à conta, pelo [executor](#rodar-no-seu-chrome). Sem o executor, o pedido não é aceito. A cada volta, o [explorador](app/services/ai_explorer.py):
+
+1. lê a tela, ou seja, os elementos clicáveis, as opções das listas e os dados que dá para guardar ([screen_data.py](app/services/engine/screen_data.py));
+2. pede o próximo passo à IA ([llm_explorer.py](app/services/engine/llm_explorer.py)), passando pelo mesmo sanitizador do reparo;
+3. executa o passo e anota no formato da gravação da extensão.
+
+Quando a IA conclui, os passos viram uma gravação comum (`create_from_recording`) e seguem para **Entender** e **Confirmar**, como se a pessoa tivesse gravado. O painel acompanha tudo pela lista de eventos do rascunho, e as dúvidas da IA aparecem lá para a pessoa responder.
+
+As travas são do código, e não da IA:
+
+- Senha nunca é digitada pela IA. Página com login vira pergunta: a pessoa entra na conta na aba do Ditto e a IA segue.
+- Botão que parece não ter volta (pagar, enviar, excluir) só é clicado com "Pode clicar" no painel.
+- Valor que não está no pedido nem nas respostas só é digitado depois da confirmação da pessoa. Assim, um texto da página não consegue fazer a IA digitar outra coisa.
+- Domínio que não é o do endereço inicial só abre se a pessoa liberar, tanto pelo `abrir_endereco` quanto por um redirecionamento do site.
+- O endereço vai para a IA sem a parte depois do `?`, que costuma levar tokens.
+- Há limite de `AI_DRAFT_MAX_STEPS` passos (40). Uma dúvida sem resposta em `AI_DRAFT_ANSWER_TIMEOUT_SECONDS` (600) encerra o pedido, e um rascunho sem sinal do worker falha, porque a aba se perdeu.
+
 ### 2. Entender
 
 O worker pega a gravação e define, para cada passo:
@@ -227,6 +246,7 @@ Todas as rotas ficam em `/api/v1` e estão documentadas em `/docs`, que só abre
 | `GET`, `PUT`, `DELETE /account/avatar` | Foto de perfil |
 | `GET /dashboard/summary` | Resumo do dia para a Mesa |
 | `GET`, `POST /flows`, `GET`, `PATCH`, `DELETE /flows/{id}` | Tarefas |
+| `GET`, `POST /ai-drafts`, `GET /ai-drafts/{id}`, `POST /ai-drafts/{id}/answer`, `/cancel` | Criar tarefa com IA: pedir, acompanhar, responder dúvidas e cancelar |
 | `PATCH /flows/{id}/steps/{id}` | Editar intenção, "não tem volta" e onde salvar |
 | `POST /flows/{id}/variables/{id}/answer`, `POST /flows/{id}/confirm` | Responder perguntas e ativar |
 | `GET`, `POST /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel` | Execuções, com CSV ou Excel |
@@ -365,6 +385,7 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 | `ENVIRONMENT`, `CORS_ORIGINS` | Ambiente e origens permitidas | Não |
 | `GOOGLE_CLIENT_ID` | Login com Google | Não |
 | `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | IA, por API compatível com OpenAI. Sem chave, a camada 3 é pulada | Não |
+| `AI_DRAFT_MAX_STEPS`, `AI_DRAFT_ANSWER_TIMEOUT_SECONDS` | Limite de passos ao criar com IA e quanto esperar uma resposta | Não |
 | `BREVO_API_KEY`, `EMAIL_FROM`, `PANEL_URL` | Alertas por e-mail. Sem chave, o aviso fica só no painel | Não |
 | `STORAGE_DIR` | Onde ficam os arquivos gerados. Em produção, precisa ser um volume | Não |
 | `BROWSER_HEADLESS` | Use `false` para ver o navegador repetindo a tarefa no seu computador | Não |

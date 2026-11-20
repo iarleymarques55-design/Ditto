@@ -102,3 +102,77 @@ def build_analysis_payload(steps: list[dict[str, Any]], secrets: Iterable[str]) 
         for step in steps
     ]
     return _assert_clean(json.dumps(data, ensure_ascii=False), protected)
+
+
+def _page_address(url: str) -> str:
+    """Sem a parte depois do "?": ela costuma levar tokens de sessão."""
+    return url.split("?", 1)[0].split("#", 1)[0][:300]
+
+
+def build_explorer_payload(
+    *,
+    prompt: str,
+    url: str,
+    title: str,
+    done: list[str],
+    last_result: str,
+    answers: list[dict[str, str]],
+    captured: list[str],
+    steps_left: int,
+    elements: list[PageElement],
+    options: dict[int, list[str]],
+    screen_data: list[Any],
+    secrets: Iterable[str] = (),
+) -> str:
+    """Monta o pedido da IA que cria tarefas. O valor dos campos nunca é coletado (snapshot.py)."""
+    protected = _usable(secrets)
+    data = {
+        "pedido_da_pessoa": scrub(prompt, protected)[:2000],
+        "endereco_atual": _short(_page_address(url), protected),
+        "titulo_da_pagina": _short(title, protected),
+        "passos_ja_feitos": [_short(item, protected) for item in done[-30:]],
+        "resultado_do_ultimo_passo": _short(last_result, protected),
+        "respostas_da_pessoa": [
+            {"pergunta": _short(item["pergunta"], protected), "resposta": _short(item["resposta"], protected)}
+            for item in answers[-10:]
+        ],
+        "dados_ja_guardados": [_short(item, protected) for item in captured],
+        "passos_que_ainda_cabem": steps_left,
+        "elementos_da_pagina": [
+            {
+                "indice": element.index,
+                "papel": element.role,
+                "tag": element.tag,
+                "texto": _short(element.text, protected),
+                "rotulo": _short(element.label, protected),
+                "dica": _short(element.placeholder, protected),
+                "tipo": element.input_type,
+                **(
+                    {"opcoes": [_short(item, protected) for item in options[element.index]]}
+                    if element.index in options
+                    else {}
+                ),
+            }
+            for element in elements[:MAX_ELEMENTS]
+        ],
+        "dados_na_tela": [
+            (
+                {
+                    "indice": item.index,
+                    "tipo": "tabela",
+                    "colunas": [_short(column, protected) for column in item.columns],
+                    "linhas": item.rows,
+                    "primeira_linha": [_short(cell, protected) for cell in item.sample],
+                }
+                if item.kind == "table"
+                else {
+                    "indice": item.index,
+                    "tipo": "valor",
+                    "rotulo": _short(item.anchor, protected),
+                    "exemplo": _short(item.sample, protected),
+                }
+            )
+            for item in screen_data
+        ],
+    }
+    return _assert_clean(json.dumps(data, ensure_ascii=False), protected)
