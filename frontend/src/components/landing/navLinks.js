@@ -4,7 +4,7 @@ export const LINKEDIN_URL = 'https://www.linkedin.com/in/iarley-marques23'
 export const YOUTUBE_URL = ''
 export const EMAIL_CONTATO = 'iarleymarques672@gmail.com'
 // Vazio: o aviso de concordância não aparece no cadastro.
-export const POLITICA_PRIVACIDADE_URL = ''
+export const POLITICA_PRIVACIDADE_URL = '/privacidade'
 
 export const INICIO = { label: 'Início', href: '#demo' }
 // Só na navbar: leva ao rodapé, então não entra na lista de links dele.

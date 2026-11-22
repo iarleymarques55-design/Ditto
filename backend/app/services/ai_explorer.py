@@ -27,7 +27,12 @@ from app.services.engine import capture, postcondition
 from app.services.engine.browser import ItemTabs, host_matches
 from app.services.engine.llm_explorer import ExplorerDecision, LlmExplorer
 from app.services.engine.safety import looks_irreversible
-from app.services.engine.screen_data import ScreenData, collect_screen_data, select_options
+from app.services.engine.screen_data import (
+    ScreenData,
+    collect_screen_data,
+    select_options,
+    visible_text,
+)
 from app.services.engine.snapshot import (
     PageElement,
     frame_locator_for,
@@ -52,6 +57,18 @@ _MAX_EVENTS = 300
 _ALLOWED_KEYS = {"Enter", "Tab", "Escape"}
 _TYPING_DELAY_MS = 10
 _PREVIEW_CELLS = 6
+# Perguntas que a própria IA decide fazer. Login, CAPTCHA, clique sem volta e site novo não contam
+_MAX_AI_QUESTIONS = 3
+# Tela sem nada costuma estar carregando: o Ditto espera sozinho em vez de perguntar
+_EMPTY_SCREEN_RETRIES = 4
+_EMPTY_SCREEN_WAIT_MS = 1500
+# A pessoa deixou os valores com a IA ("dados de exemplo", "escolha do seu jeito")
+_FREE_CHOICE = re.compile(
+    r"\b(exemplos?|fict[ií]ci[oa]s?|qualquer|quaisquer|aleat[oó]ri[oa]s?|invente|inventar|"
+    r"do seu jeito|como quiser|tanto faz|voc[eê] escolhe|escolha voc[eê])\b"
+)
+# O pedido fala em guardar dados da tela
+_WANTS_CAPTURE = re.compile(r"\b(guard|captur|copi|extra[ií]|anot)\w*")
 # Os mesmos alvos que a extensão grava no Excel Online (extension/recorder.js)
 _NAME_BOX = {
     "css": "#FormulaBar-NameBox-input",
@@ -70,6 +87,7 @@ YES_CLICK = "Pode clicar"
 NO_CLICK = "Não clique"
 YES_TYPE = "Pode digitar"
 NO_TYPE = "Não, é outro valor"
+YES_VALUE = "Está certo"
 YES_CELLS = "Pode escrever"
 NO_CELLS = "Não escreva"
 YES_HOST = "Liberar"
@@ -91,6 +109,10 @@ class _Failed(Exception):
     """A criação não tem como seguir. A mensagem aparece no painel."""
 
 
+class BrowserUnavailableError(Exception):
+    """A ligação com o Chrome caiu antes de a IA abrir a aba. Quem chama reconecta e tenta de novo."""
+
+
 def _same(answer: str, option: str) -> bool:
     return answer.strip().casefold() == option.casefold()
 
@@ -104,6 +126,9 @@ def _host_of(url: str) -> str:
 
 
 def _name_of(element: PageElement) -> str:
+    # O texto de uma lista é a opção que está escolhida agora, e não o nome dela
+    if element.role in {"listbox", "combobox"} and element.label:
+        return element.label
     return element.text or element.label or element.placeholder or element.name or element.role
 
 
@@ -129,6 +154,8 @@ class AiExplorer:
         # Onde está cada elemento da última leitura, inclusive dentro de iframes
         self.locators: dict[int, Locator] = {}
         self.last_heartbeat = 0.0
+        self.ai_questions = 0
+        self.capture_reminded = False
 
     # ---------- banco ----------
 
@@ -151,9 +178,6 @@ class AiExplorer:
     def _event_entry(self, kind: str, text: str) -> list[dict[str, Any]]:
         entry = {"at": datetime.now(UTC).isoformat(), "kind": kind, "text": text[:300]}
         return [*(self.draft.events or []), entry][-_MAX_EVENTS:]
-
-    def _event(self, kind: str, text: str) -> None:
-        self._save(events=self._event_entry(kind, text))
 
     def _add_step(self, step: dict[str, Any], description: str) -> str | None:
         """Devolve um erro para a IA quando o passo não serve como gravação."""
@@ -224,7 +248,8 @@ class AiExplorer:
         except PlaywrightError:
             return ""
 
-    def _click(self, page: Page, locator: Locator) -> Download | None:
+    def _click(self, page: Page, locator: Locator) -> tuple[Download | None, bool]:
+        """O arquivo baixado, se houver, e se a tela mudou depois do clique."""
         downloads: list[Download] = []
 
         # O Playwright só aceita funções Python como ouvinte, e não métodos embutidos
@@ -236,21 +261,31 @@ class AiExplorer:
             before = self._fingerprint(page)
             locator.click()
             self._settle(page)
+            changed = self._fingerprint(page) != before
             # Um clique que baixa um arquivo costuma deixar a página igual
-            if not downloads and self._fingerprint(page) == before:
+            if not downloads and not changed:
                 deadline = time.monotonic() + _DOWNLOAD_WAIT_SECONDS
                 while not downloads and time.monotonic() < deadline:
                     page.wait_for_timeout(_POLL_MS)
+                changed = self._fingerprint(page) != before
         finally:
             page.remove_listener("download", on_download)
-        return downloads[0] if downloads else None
+        return (downloads[0] if downloads else None), changed
 
     # ---------- passos ----------
 
+    def _person_texts(self) -> list[str]:
+        return [self.draft.prompt, *(item["resposta"] for item in self.answers)]
+
     def _mentioned(self, value: str) -> bool:
         wanted = _normalize(value)
-        sources = [self.draft.prompt, *(item["resposta"] for item in self.answers)]
-        return any(wanted in _normalize(source) for source in sources)
+        return any(wanted in _normalize(source) for source in self._person_texts())
+
+    def _value_ok(self, value: str) -> bool:
+        """Valor que veio da pessoa, ou que ela deixou a IA escolher, não precisa de confirmação."""
+        if self._mentioned(value):
+            return True
+        return any(_FREE_CHOICE.search(_normalize(source)) for source in self._person_texts())
 
     def _capture_names(self) -> set[str]:
         return {
@@ -294,7 +329,7 @@ class AiExplorer:
             "capture_name": name,
             "capture_kind": "table" if wants_table else "value",
         }
-        return self._add_step(step, decision.descricao or text) or f"ok: {text.lower()}"
+        return self._add_step(step, text) or f"ok: {text[:1].lower()}{text[1:]}"
 
     def _open_address(self, page: Page, decision: ExplorerDecision) -> str:
         url = (decision.endereco or "").strip()
@@ -312,7 +347,7 @@ class AiExplorer:
         page.goto(url, wait_until="domcontentloaded")
         self._settle(page)
         step = {"action": StepAction.NAVIGATE.value, "url": url}
-        return self._add_step(step, decision.descricao or f"Abrir {host}") or f"ok: abriu {host}"
+        return self._add_step(step, f"Abrir {host}") or f"ok: abriu {host}"
 
     def _allow(self, host: str) -> None:
         if host not in self.allowed:
@@ -338,7 +373,7 @@ class AiExplorer:
                 )
                 if not _same(answer, YES_CLICK):
                     return "A pessoa não quis esse clique. Se o pedido já foi cumprido, conclua."
-            download = self._click(page, locator)
+            download, changed = self._click(page, locator)
             step["action"] = StepAction.CLICK.value
             if download is not None:
                 extension = download.suggested_filename.rsplit(".", 1)[-1].lower()
@@ -348,43 +383,103 @@ class AiExplorer:
                     download.delete()
                 except PlaywrightError:
                     pass
-            text = decision.descricao or f'Clicar em "{name}"'
-            return self._add_step(step, text) or (
-                "ok: um arquivo foi baixado" if download else "ok: clique feito"
-            )
+            if download:
+                outcome = "ok: um arquivo foi baixado"
+            elif changed:
+                outcome = "ok: clique feito e a tela mudou. Confira texto_da_tela."
+            else:
+                # Dizer "ok" aqui fazia a IA seguir como se o clique tivesse funcionado
+                outcome = "clique feito, mas nada mudou na tela. Talvez o elemento esteja errado."
+            return self._add_step(step, f'Clicar em "{name}"') or outcome
 
         if decision.acao == "digitar":
             if element.input_type == "password":
                 return "erro: senhas não são digitadas pela IA. Peça para a pessoa entrar na conta."
             if not value:
                 return "erro: falta o valor a digitar."
-            if not self._mentioned(value):
-                answer = self._ask(
-                    f'Vou digitar "{value}" em "{name}". Está certo?', [YES_TYPE, NO_TYPE]
-                )
-                if not _same(answer, YES_TYPE):
-                    return "A pessoa não confirmou esse valor. Pergunte qual é o valor certo."
+            refused = self._confirm_value("digitar", value, name, YES_TYPE)
+            if refused:
+                return refused
             locator.fill(value)
             step |= {"action": StepAction.FILL.value, "value": value}
-            text = decision.descricao or f'Digitar "{value}" em "{name}"'
+            text = f'Digitar "{value}" em "{name}"'
         elif decision.acao == "escolher":
             if not value:
                 return "erro: falta a opção a escolher."
+            refused = self._confirm_value("escolher", value, name, YES_VALUE)
+            if refused:
+                return refused
+            if element.tag != "select":
+                return self._choose_in_custom_list(page, element, locator, value)
             locator.select_option(label=value)
             step |= {"action": StepAction.SELECT.value, "value": value}
-            text = decision.descricao or f'Escolher "{value}" em "{name}"'
+            text = f'Escolher "{value}" em "{name}"'
         elif decision.acao == "marcar":
+            question = element.group or name
+            refused = self._confirm_value("marcar", name, question, YES_VALUE)
+            if refused:
+                return refused
             locator.check()
             step["action"] = StepAction.CHECK.value
-            text = decision.descricao or f'Marcar "{name}"'
+            text = f'Marcar "{name}" em "{element.group}"' if element.group else f'Marcar "{name}"'
         else:
             key = value if value in _ALLOWED_KEYS else "Enter"
             locator.press(key)
             step |= {"action": StepAction.PRESS.value, "value": key}
-            text = decision.descricao or f'Apertar {key} em "{name}"'
+            text = f'Apertar {key} em "{name}"'
 
         self._settle(page)
-        return self._add_step(step, text) or "ok: feito"
+        return self._add_step(step, text) or f"ok: {text[:1].lower()}{text[1:]}"
+
+    def _confirm_value(self, verb: str, value: str, field: str, yes: str) -> str | None:
+        """Um aviso para a IA quando a pessoa não confirmou um valor que não veio dela."""
+        if self._value_ok(value):
+            return None
+        answer = self._ask(f'Vou {verb} "{value}" em "{field}". Está certo?', [yes, NO_TYPE])
+        if _same(answer, yes):
+            return None
+        return "A pessoa não confirmou esse valor. Pergunte qual é o valor certo."
+
+    def _choose_in_custom_list(
+        self, page: Page, element: PageElement, locator: Locator, value: str
+    ) -> str:
+        """Listas que não são <select>, como as do Google Forms: abrir e clicar na opção. Ficam
+        gravados os dois cliques, que o executor já sabe repetir."""
+        name = _name_of(element)
+        self._click(page, locator)
+        option = self._visible_option(page, locator, value)
+        if option is None:
+            page.keyboard.press("Escape")
+            return f'erro: a opção "{value}" não apareceu na lista "{name}". Use uma das opções.'
+        opened = {
+            "action": StepAction.CLICK.value,
+            "url": page.url,
+            "target": element.to_target(),
+        }
+        error = self._add_step(opened, f'Abrir a lista "{name}"')
+        if error:
+            return error
+        tag = option.evaluate("el => el.tagName.toLowerCase()")
+        chosen = {
+            "action": StepAction.CLICK.value,
+            "url": page.url,
+            "target": {"role": "option", "tag": tag, "text": value, "neighbors": [name]},
+        }
+        option.click()
+        self._settle(page)
+        text = f'Escolher "{value}" em "{name}"'
+        return self._add_step(chosen, text) or f"ok: {text[:1].lower()}{text[1:]}"
+
+    def _visible_option(self, page: Page, listbox: Locator, value: str) -> Locator | None:
+        # Há sites que desenham as opções fora da lista, no fim da página
+        for scope in (listbox, page):
+            option = scope.get_by_role("option", name=value, exact=True)
+            try:
+                if option.count() == 1 and option.is_visible():
+                    return option
+            except PlaywrightError:
+                continue
+        return None
 
     def _spreadsheet_frame(self, page: Page) -> Any:
         for frame in page.frames:
@@ -408,7 +503,7 @@ class AiExplorer:
         if room < len(cells):
             return f"erro: só cabem mais {max(room, 0)} células nesta tarefa."
 
-        if not all(self._mentioned(cell.valor) for cell in cells if cell.valor):
+        if not all(self._value_ok(cell.valor) for cell in cells if cell.valor):
             preview = ", ".join(f'{cell.celula} "{cell.valor}"' for cell in cells[:_PREVIEW_CELLS])
             rest = len(cells) - _PREVIEW_CELLS
             more = f" e mais {rest}" if rest > 0 else ""
@@ -489,6 +584,33 @@ class AiExplorer:
             events=self._event_entry("info", "Pronto. A tarefa foi para a revisão."),
         )
 
+    def _ai_question(self, decision: ExplorerDecision) -> str:
+        """Só as dúvidas de verdade chegam à pessoa: repetidas ou além do limite voltam para a IA."""
+        question = decision.pergunta or "Como devo seguir?"
+        for item in self.answers:
+            if _normalize(item["pergunta"]) == _normalize(question):
+                return f"A pessoa já respondeu isso: {item['resposta']}. Siga com essa resposta."
+        if self.ai_questions >= _MAX_AI_QUESTIONS:
+            return (
+                "erro: acabaram as perguntas. Escolha o mais razoável e siga; "
+                "a pessoa revisa a tarefa no final."
+            )
+        self.ai_questions += 1
+        answer = self._ask(question, decision.opcoes)
+        return f"A pessoa respondeu: {answer}"
+
+    def _missing_capture(self) -> str | None:
+        """Um aviso, uma vez só, quando a IA quer concluir sem guardar o dado que o pedido pede."""
+        if self.capture_reminded or self._capture_names():
+            return None
+        if not _WANTS_CAPTURE.search(_normalize(self.draft.prompt)):
+            return None
+        self.capture_reminded = True
+        return (
+            "erro: o pedido fala em guardar dados, mas nenhum dado foi guardado. Use "
+            "capturar_tabela ou capturar_valor. Se não houver o que guardar, conclua de novo."
+        )
+
     def _apply(
         self,
         page: Page,
@@ -497,14 +619,15 @@ class AiExplorer:
         data: list[ScreenData],
     ) -> object:
         if decision.acao == "concluir":
+            reminder = self._missing_capture()
+            if reminder:
+                return reminder
             self._finish(decision.nome_da_tarefa)
             return _DONE
         if decision.acao == "desistir":
             raise _Failed(f"A IA parou: {decision.motivo or 'não encontrou como seguir.'}")
         if decision.acao == "perguntar":
-            question = decision.pergunta or "Como devo seguir?"
-            answer = self._ask(question, decision.opcoes)
-            return f"A pessoa respondeu: {answer}"
+            return self._ai_question(decision)
         if decision.acao in {"capturar_tabela", "capturar_valor"}:
             return self._capture(page, decision, data)
         if decision.acao == "abrir_endereco":
@@ -568,7 +691,7 @@ class AiExplorer:
 
     # ---------- laço ----------
 
-    def _decide(self, page: Page, last_result: str, steps_left: int) -> tuple:
+    def _read_elements(self, page: Page) -> tuple[list[PageElement], dict[int, list[str]]]:
         elements: list[PageElement] = []
         options: dict[int, list[str]] = {}
         frame_options: dict[Any, dict[int, list[str]]] = {}
@@ -580,7 +703,25 @@ class AiExplorer:
                 options[element.index] = frame_options[frame][local]
             self.locators[element.index] = frame_locator_for(frame, local)
             elements.append(element)
-        data = collect_screen_data(page)
+        return elements, options
+
+    def _read_screen(
+        self, page: Page
+    ) -> tuple[list[PageElement], dict[int, list[str]], list[ScreenData]]:
+        """Uma tela vazia costuma estar carregando. Sem esta espera a IA concluía que não havia
+        nada na página e desistia, ou perguntava à pessoa."""
+        for attempt in range(_EMPTY_SCREEN_RETRIES + 1):
+            elements, options = self._read_elements(page)
+            data = collect_screen_data(page)
+            if elements or data or attempt == _EMPTY_SCREEN_RETRIES:
+                return elements, options, data
+            self._check_open()
+            page.wait_for_timeout(_EMPTY_SCREEN_WAIT_MS)
+            self._settle(page)
+        return [], {}, []
+
+    def _decide(self, page: Page, last_result: str, steps_left: int) -> tuple:
+        elements, options, data = self._read_screen(page)
         payload = sanitizer.build_explorer_payload(
             prompt=self.draft.prompt,
             url=page.url,
@@ -593,6 +734,9 @@ class AiExplorer:
             elements=elements,
             options=options,
             screen_data=data,
+            screen_text=visible_text(page),
+            spreadsheet=self._spreadsheet_frame(page) is not None,
+            questions_left=_MAX_AI_QUESTIONS - self.ai_questions,
         )
         return self.llm.decide(payload), elements, data
 
@@ -631,13 +775,16 @@ class AiExplorer:
             self._stop_by_person()
 
     def run(self) -> None:
-        tabs: ItemTabs | None = None
+        try:
+            tabs = ItemTabs(self.browser, self.allowed, on_blocked=self.blocked.append)
+        except PlaywrightError as error:
+            # A extensão pode ter reiniciado sem o Playwright perceber: a ligação antiga não serve
+            raise BrowserUnavailableError from error
         try:
             self._save(
                 status=AiDraftStatus.RUNNING,
                 events=self._event_entry("info", "Abri uma aba no seu Chrome."),
             )
-            tabs = ItemTabs(self.browser, self.allowed, on_blocked=self.blocked.append)
             page = tabs.current
             page.goto(self.draft.start_url, wait_until="domcontentloaded")
             self._settle(page)
@@ -656,8 +803,7 @@ class AiExplorer:
             logger.warning("Rascunho %s: o navegador parou.", self.draft.id, exc_info=True)
             self._fail("A aba do Ditto foi fechada ou o Chrome parou de responder.")
         finally:
-            if tabs is not None:
-                tabs.close()
+            tabs.close()
 
     def _fail(self, message: str) -> None:
         try:

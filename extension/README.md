@@ -43,12 +43,16 @@ Com o executor ligado, o worker roda as tarefas da sua conta aqui, em uma aba ao
 
 Como funciona ([runner.js](runner.js)):
 
-- A extensão conecta em `ws://127.0.0.1:8765` com um token próprio, que dura 30 dias e não vale em nenhuma rota da API.
+- A extensão conecta no endereço de [config.js](config.js) (`ws://127.0.0.1:8765` no seu computador) com um token próprio, que dura 30 dias e não vale em nenhuma rota da API. Fora do computador local, só aceita `wss://`.
 - Cada linha abre uma aba ao lado da aba ativa, controlada com `chrome.debugger`. Só as abas abertas pelo Ditto, e as janelas que elas abrem, são controladas. Comandos para qualquer outra aba são recusados pela própria extensão.
 - Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". Clicar em **Cancelar** nela para a linha.
-- Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto copia o arquivo.
+- Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto pega o arquivo. Com o worker na mesma máquina, ele copia da pasta; com o worker na nuvem ou no Docker, a extensão baixa o mesmo endereço de novo, com as suas contas, e manda o conteúdo pela conexão (até 40 MB). Download gerado por envio de formulário (POST) não pode ser buscado de novo.
 - Precisa das permissões `debugger` (controlar as abas do Ditto) e `alarms` (tentar de novo quando o worker estava desligado).
 
-## Publicar para outro endereço do painel
+## Publicar com o Ditto na nuvem
 
-As origens do painel ficam em `content_scripts.matches`, no [manifest.json](manifest.json). Em produção, troque `http://localhost:5173/*` pelo endereço real (`https://...`).
+O worker publicado atende várias pessoas ao mesmo tempo, cada uma no próprio Chrome.
+
+1. Em [config.js](config.js), troque `RELE_URL` pelo endereço do worker publicado, com `wss://` (ex.: `wss://ditto-worker.up.railway.app/extension`).
+2. Em `content_scripts.matches`, no [manifest.json](manifest.json), troque `http://localhost:5173/*` pelo endereço do painel (`https://...`).
+3. No worker, preencha `EXTENSION_RELAY_HOST=0.0.0.0` e `EXTENSION_ORIGINS=["chrome-extension://<id>"]` com o id da extensão (aparece em `chrome://extensions`). Sem a lista, o worker não inicia com a porta aberta para a rede.

@@ -4,10 +4,17 @@ O Playwright acha que está falando com um navegador comum (CDP), mas esse "nave
 as abas que o Ditto abriu. A extensão abre cada aba ao lado da aba ativa, controla a aba com
 chrome.debugger e repassa os comandos. As outras abas da pessoa nunca entram aqui.
 
-Roda numa thread do worker e só escuta em 127.0.0.1.
+Roda numa thread do worker e atende várias pessoas ao mesmo tempo, cada uma isolada das outras.
+São duas portas:
+- a da extensão, que pode ficar aberta para a internet (Ditto publicado) e só aceita quem
+  apresenta o token do executor;
+- a do Playwright, que sempre escuta só em 127.0.0.1, num endereço com segredo: quem a alcança
+  controla as abas do Ditto, então ela nunca sai da máquina do worker.
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import secrets
@@ -19,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from websockets.asyncio.server import ServerConnection, serve
+from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
@@ -27,9 +34,14 @@ logger = logging.getLogger(__name__)
 _HELLO_TIMEOUT_SECONDS = 10
 # Um download grande pode demorar: é o maior tempo que um comando à extensão pode levar
 _EXTENSION_TIMEOUT_SECONDS = 120
-# Capturas de tela vêm em base64 e podem passar de alguns megabytes
+# Antes do token, só cabe a apresentação: ninguém de fora ocupa memória do worker
+_MAX_HELLO_BYTES = 16 * 1024
+# Capturas de tela e arquivos baixados vêm em base64 e podem passar de alguns megabytes
 _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+_MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024
+_MAX_CONNECTIONS = 500
 _CLOSE_POLICY = 1008
+_CLOSE_TRY_LATER = 1013
 _CLOSE_UNAUTHORIZED = 4401
 _BROWSER_TARGET = {
     "targetId": "ditto-browser",
@@ -54,46 +66,58 @@ class _Tab:
     children: set[str] = field(default_factory=set)
 
 
+@dataclass
+class _Link:
+    """Tudo o que é de uma pessoa: a extensão dela, a conexão do Playwright e as abas."""
+
+    user_id: uuid.UUID
+    extension: ServerConnection
+    cdp: ServerConnection | None = None
+    next_id: int = 0
+    pending: dict[int, asyncio.Future[Any]] = field(default_factory=dict)
+    tabs: dict[int, _Tab] = field(default_factory=dict)
+    next_session: int = 0
+    download_path: str | None = None
+    downloads: dict[str, str] = field(default_factory=dict)
+
+
 class ExtensionRelay:
     def __init__(
         self,
         port: int,
         authenticate: Callable[[str], uuid.UUID | None],
         host: str = "127.0.0.1",
+        allowed_origins: list[str] | None = None,
+        local_downloads: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self._authenticate = authenticate
-        # Muda a cada vez que o worker sobe: outro programa do computador não acha o endereço
+        # Vazio: qualquer extensão do Chrome pode tentar (o token ainda é exigido)
+        self._allowed_origins = set(allowed_origins or [])
+        # Worker e Chrome na mesma máquina: o arquivo baixado é copiado direto da pasta dele
+        self._local_downloads = local_downloads
+        # Muda a cada vez que o worker sobe: outro programa da máquina não acha o endereço
         self._secret = secrets.token_urlsafe(24)
+        self._cdp_port = 0
 
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
 
-        self._extension: ServerConnection | None = None
-        self._user_id: uuid.UUID | None = None
-        self._cdp: ServerConnection | None = None
-
-        self._next_id = 0
-        self._pending: dict[int, asyncio.Future[Any]] = {}
-        self._tabs: dict[int, _Tab] = {}
-        self._next_session = 0
-        self._download_path: str | None = None
-        self._downloads: dict[str, str] = {}
+        self._links: dict[uuid.UUID, _Link] = {}
+        self._connections = 0
         self._tasks: set[asyncio.Task[Any]] = set()
 
     # ─── Usado pelo worker ────────────────────────────────────────────────
 
-    @property
-    def cdp_url(self) -> str:
-        return f"ws://{self.host}:{self.port}/cdp/{self._secret}"
+    def connected_users(self) -> list[uuid.UUID]:
+        """As contas com a extensão ligada agora."""
+        return list(self._links)
 
-    @property
-    def user_id(self) -> uuid.UUID | None:
-        """A conta que conectou a extensão. Nulo enquanto não há extensão."""
-        return self._user_id if self._extension is not None else None
+    def cdp_url_for(self, user_id: uuid.UUID) -> str:
+        return f"ws://127.0.0.1:{self._cdp_port}/cdp/{self._secret}/{user_id}"
 
     def start(self) -> None:
         started = threading.Event()
@@ -118,33 +142,47 @@ class ExtensionRelay:
         self._loop = asyncio.get_running_loop()
         self._stopping = asyncio.Event()
         try:
-            async with serve(
-                self._handle, self.host, self.port, max_size=_MAX_MESSAGE_BYTES
-            ) as server:
-                self.port = next(iter(server.sockets)).getsockname()[1]
+            async with (
+                serve(
+                    self._serve_extension, self.host, self.port, max_size=_MAX_HELLO_BYTES
+                ) as extension_server,
+                serve(self._serve_cdp, "127.0.0.1", 0, max_size=_MAX_MESSAGE_BYTES) as cdp_server,
+            ):
+                self.port = _bound_port(extension_server)
+                self._cdp_port = _bound_port(cdp_server)
                 started.set()
                 await self._stopping.wait()
         except OSError as error:
             self._startup_error = error
             started.set()
 
-    async def _handle(self, connection: ServerConnection) -> None:
-        path = connection.request.path if connection.request else ""
-        if path == "/extension":
-            await self._serve_extension(connection)
-        elif secrets.compare_digest(path, f"/cdp/{self._secret}"):
-            await self._serve_cdp(connection)
-        else:
-            await connection.close(_CLOSE_POLICY, "Endereço desconhecido.")
-
     # ─── Lado da extensão ─────────────────────────────────────────────────
 
-    async def _serve_extension(self, connection: ServerConnection) -> None:
+    def _origin_allowed(self, origin: str) -> bool:
         # Só uma extensão do Chrome abre este socket. Uma página comum mandaria a própria origem
-        origin = connection.request.headers.get("Origin", "") if connection.request else ""
         if not origin.startswith("chrome-extension://"):
+            return False
+        return not self._allowed_origins or origin in self._allowed_origins
+
+    async def _serve_extension(self, connection: ServerConnection) -> None:
+        request = connection.request
+        if request is None or request.path != "/extension":
+            await connection.close(_CLOSE_POLICY, "Endereço desconhecido.")
+            return
+        if not self._origin_allowed(request.headers.get("Origin", "")):
             await connection.close(_CLOSE_POLICY, "Origem não autorizada.")
             return
+        if self._connections >= _MAX_CONNECTIONS:
+            await connection.close(_CLOSE_TRY_LATER, "Muitas conexões. Tente de novo em instantes.")
+            return
+
+        self._connections += 1
+        try:
+            await self._welcome(connection)
+        finally:
+            self._connections -= 1
+
+    async def _welcome(self, connection: ServerConnection) -> None:
         try:
             hello = json.loads(await asyncio.wait_for(connection.recv(), _HELLO_TIMEOUT_SECONDS))
             token = str(hello.get("token", "")) if isinstance(hello, dict) else ""
@@ -159,41 +197,43 @@ class ExtensionRelay:
             )
             return
 
-        if self._extension is not None:
+        old = self._links.get(user_id)
+        if old is not None:
             # O service worker da extensão reiniciou: a conexão nova vale
-            await self._drop_extension("Outra conexão da extensão assumiu.")
-        self._extension = connection
-        self._user_id = user_id
+            await self._drop(old, "Outra conexão da extensão assumiu.")
+        link = _Link(user_id, connection)
+        self._links[user_id] = link
+        # Depois do token, cabem as capturas de tela e os arquivos baixados. Vale a partir do
+        # próximo quadro, e a extensão só manda algo depois do "welcome"
+        connection.protocol.max_message_size = _MAX_MESSAGE_BYTES
         await connection.send(json.dumps({"type": "welcome"}))
         logger.info("Extensão conectada: as tarefas desta conta rodam no Chrome dela.")
 
         try:
             async for raw in connection:
-                self._on_extension_message(json.loads(raw))
+                self._on_extension_message(link, json.loads(raw))
         except (ConnectionClosed, ValueError):
             pass
         finally:
-            if self._extension is connection:
-                await self._drop_extension("A extensão desconectou.")
-                logger.info("Extensão desconectada: as execuções esperam na fila.")
+            if self._links.get(user_id) is link:
+                await self._drop(link, "A extensão desconectou.")
+                logger.info("Extensão desconectada: as execuções desta conta esperam na fila.")
 
-    async def _drop_extension(self, reason: str) -> None:
-        old = self._extension
-        self._extension = None
-        self._user_id = None
-        for future in self._pending.values():
+    async def _drop(self, link: _Link, reason: str) -> None:
+        if self._links.get(link.user_id) is link:
+            del self._links[link.user_id]
+        for future in link.pending.values():
             if not future.done():
                 future.set_exception(RelayError(reason))
-        self._pending.clear()
-        self._tabs.clear()
-        if old is not None:
-            await old.close(1000, reason)
-        if self._cdp is not None:
-            await self._cdp.close(1000, reason)
+        link.pending.clear()
+        link.tabs.clear()
+        await link.extension.close(1000, reason)
+        if link.cdp is not None:
+            await link.cdp.close(1000, reason)
 
-    def _on_extension_message(self, message: dict[str, Any]) -> None:
+    def _on_extension_message(self, link: _Link, message: dict[str, Any]) -> None:
         if "id" in message:
-            future = self._pending.pop(message["id"], None)
+            future = link.pending.pop(message["id"], None)
             if future is None or future.done():
                 return
             if "error" in message:
@@ -206,6 +246,7 @@ class ExtensionRelay:
         if event == "cdpEvent":
             self._spawn(
                 self._on_tab_event(
+                    link,
                     message["tabId"],
                     message.get("sessionId"),
                     message["method"],
@@ -215,70 +256,83 @@ class ExtensionRelay:
         elif event == "tabAttached":
             self._spawn(
                 self._register_tab(
-                    message["tabId"], message["targetInfo"], message.get("openerTabId")
+                    link, message["tabId"], message["targetInfo"], message.get("openerTabId")
                 )
             )
         elif event == "tabDetached":
-            self._spawn(self._forget_tab(message["tabId"]))
+            self._spawn(self._forget_tab(link, message["tabId"]))
 
-    async def _call_extension(self, command: str, **params: Any) -> Any:
-        if self._extension is None or self._loop is None:
+    async def _call_extension(self, link: _Link, command: str, **params: Any) -> Any:
+        if self._links.get(link.user_id) is not link or self._loop is None:
             raise RelayError("A extensão não está conectada.")
-        self._next_id += 1
-        message_id = self._next_id
+        link.next_id += 1
+        message_id = link.next_id
         future: asyncio.Future[Any] = self._loop.create_future()
-        self._pending[message_id] = future
+        link.pending[message_id] = future
         try:
-            await self._extension.send(
+            await link.extension.send(
                 json.dumps({"id": message_id, "method": command, "params": params})
             )
             return await asyncio.wait_for(future, _EXTENSION_TIMEOUT_SECONDS)
         except ConnectionClosed as error:
             raise RelayError("A extensão desconectou.") from error
         finally:
-            self._pending.pop(message_id, None)
+            link.pending.pop(message_id, None)
 
     # ─── Lado do Playwright ───────────────────────────────────────────────
 
+    def _link_for_cdp_path(self, path: str) -> _Link | None:
+        prefix = f"/cdp/{self._secret}/"
+        if not secrets.compare_digest(path[: len(prefix)], prefix):
+            return None
+        try:
+            user_id = uuid.UUID(path[len(prefix) :])
+        except ValueError:
+            return None
+        return self._links.get(user_id)
+
     async def _serve_cdp(self, connection: ServerConnection) -> None:
-        if self._extension is None or self._cdp is not None:
-            await connection.close(_CLOSE_POLICY, "A extensão não está conectada.")
+        path = connection.request.path if connection.request else ""
+        link = self._link_for_cdp_path(path)
+        if link is None or link.cdp is not None:
+            await connection.close(_CLOSE_POLICY, "A extensão desta conta não está conectada.")
             return
-        self._cdp = connection
+        link.cdp = connection
         try:
             async for raw in connection:
                 # Em paralelo, como num navegador de verdade: a ordem de saída se mantém
-                self._spawn(self._answer(json.loads(raw)))
+                self._spawn(self._answer(link, json.loads(raw)))
         except (ConnectionClosed, ValueError):
             pass
         finally:
-            if self._cdp is connection:
-                self._cdp = None
-                self._tabs.clear()
-                if self._extension is not None:
-                    try:
-                        await self._call_extension("detachAll")
-                    except RelayError:
-                        pass
+            if link.cdp is connection:
+                link.cdp = None
+                link.tabs.clear()
+                try:
+                    await self._call_extension(link, "detachAll")
+                except RelayError:
+                    pass
 
-    async def _answer(self, message: dict[str, Any]) -> None:
+    async def _answer(self, link: _Link, message: dict[str, Any]) -> None:
         session_id = message.get("sessionId")
         reply: dict[str, Any] = {"id": message.get("id")}
         try:
             reply["result"] = await self._dispatch(
-                message.get("method", ""), message.get("params") or {}, session_id
+                link, message.get("method", ""), message.get("params") or {}, session_id
             )
         except (RelayError, TimeoutError) as error:
             reply["error"] = {"code": -32000, "message": str(error) or "Sem resposta da extensão."}
         if session_id:
             reply["sessionId"] = session_id
-        await self._send_cdp(reply)
+        await self._send_cdp(link, reply)
 
-    async def _dispatch(self, method: str, params: dict[str, Any], session_id: str | None) -> Any:
+    async def _dispatch(
+        self, link: _Link, method: str, params: dict[str, Any], session_id: str | None
+    ) -> Any:
         if session_id:
-            tab, child = self._resolve(session_id)
+            tab, child = self._resolve(link, session_id)
             return await self._call_extension(
-                "send", tabId=tab.tab_id, sessionId=child, method=method, params=params
+                link, "send", tabId=tab.tab_id, sessionId=child, method=method, params=params
             )
 
         if method == "Browser.getVersion":
@@ -290,8 +344,8 @@ class ExtensionRelay:
                 "jsVersion": "",
             }
         if method == "Browser.setDownloadBehavior":
-            # O Chrome da pessoa baixa na pasta dela; o relé copia cada arquivo para cá
-            self._download_path = params.get("downloadPath")
+            # O Chrome da pessoa baixa na pasta dela; o relé traz cada arquivo para cá
+            link.download_path = params.get("downloadPath")
             return {}
         if method in {"Target.setAutoAttach", "Target.setDiscoverTargets"}:
             # Não anexa nada: as abas que já existem são da pessoa
@@ -301,55 +355,60 @@ class ExtensionRelay:
         if method == "Target.getBrowserContexts":
             return {"browserContextIds": []}
         if method == "Target.createTarget":
-            created = await self._call_extension("createTab")
-            tab = await self._register_tab(created["tabId"], created["targetInfo"])
+            created = await self._call_extension(link, "createTab")
+            tab = await self._register_tab(link, created["tabId"], created["targetInfo"])
             return {"targetId": tab.target_id}
         if method == "Target.closeTarget":
             tab = next(
-                (tab for tab in self._tabs.values() if tab.target_id == params.get("targetId")),
+                (tab for tab in link.tabs.values() if tab.target_id == params.get("targetId")),
                 None,
             )
             if tab is None:
                 return {"success": False}
-            await self._call_extension("closeTab", tabId=tab.tab_id)
+            await self._call_extension(link, "closeTab", tabId=tab.tab_id)
             return {"success": True}
         raise RelayError(f"{method} não é usado no Chrome da pessoa.")
 
-    def _resolve(self, session_id: str) -> tuple[_Tab, str | None]:
-        for tab in self._tabs.values():
+    def _resolve(self, link: _Link, session_id: str) -> tuple[_Tab, str | None]:
+        for tab in link.tabs.values():
             if tab.session_id == session_id:
                 return tab, None
             if session_id in tab.children:
                 return tab, session_id
         raise RelayError("Esta aba já foi fechada.")
 
-    async def _send_cdp(self, message: dict[str, Any]) -> None:
-        if self._cdp is None:
+    async def _send_cdp(self, link: _Link, message: dict[str, Any]) -> None:
+        if link.cdp is None:
             return
         try:
-            await self._cdp.send(json.dumps(message))
+            await link.cdp.send(json.dumps(message))
         except ConnectionClosed:
             pass
 
     # ─── Abas ─────────────────────────────────────────────────────────────
 
     async def _register_tab(
-        self, tab_id: int, target_info: dict[str, Any], opener_tab_id: int | None = None
+        self,
+        link: _Link,
+        tab_id: int,
+        target_info: dict[str, Any],
+        opener_tab_id: int | None = None,
     ) -> _Tab:
-        existing = self._tabs.get(tab_id)
+        existing = link.tabs.get(tab_id)
         if existing is not None:
             return existing
-        self._next_session += 1
-        tab = _Tab(tab_id, f"ditto-aba-{self._next_session}", target_info["targetId"])
-        self._tabs[tab_id] = tab
+        link.next_session += 1
+        tab = _Tab(tab_id, f"ditto-aba-{link.next_session}", target_info["targetId"])
+        link.tabs[tab_id] = tab
 
         info = {**target_info, "attached": True}
         info.setdefault("browserContextId", "ditto-padrao")
         # Assim o Playwright entende a aba nova como janela aberta pelo site (evento popup)
-        opener = self._tabs.get(opener_tab_id) if opener_tab_id is not None else None
+        opener = link.tabs.get(opener_tab_id) if opener_tab_id is not None else None
         if opener is not None and not info.get("openerId"):
             info["openerId"] = opener.target_id
         await self._send_cdp(
+            link,
             {
                 "method": "Target.attachedToTarget",
                 "params": {
@@ -357,24 +416,30 @@ class ExtensionRelay:
                     "targetInfo": info,
                     "waitingForDebugger": False,
                 },
-            }
+            },
         )
         return tab
 
-    async def _forget_tab(self, tab_id: int) -> None:
-        tab = self._tabs.pop(tab_id, None)
+    async def _forget_tab(self, link: _Link, tab_id: int) -> None:
+        tab = link.tabs.pop(tab_id, None)
         if tab is not None:
             await self._send_cdp(
+                link,
                 {
                     "method": "Target.detachedFromTarget",
                     "params": {"sessionId": tab.session_id, "targetId": tab.target_id},
-                }
+                },
             )
 
     async def _on_tab_event(
-        self, tab_id: int, child_session: str | None, method: str, params: dict[str, Any]
+        self,
+        link: _Link,
+        tab_id: int,
+        child_session: str | None,
+        method: str,
+        params: dict[str, Any],
     ) -> None:
-        tab = self._tabs.get(tab_id)
+        tab = link.tabs.get(tab_id)
         if tab is None:
             return
         if method == "Target.attachedToTarget":
@@ -382,41 +447,63 @@ class ExtensionRelay:
         elif method == "Target.detachedFromTarget":
             tab.children.discard(params.get("sessionId", ""))
         elif method == "Page.downloadWillBegin":
-            self._downloads[params["guid"]] = params["url"]
-            await self._send_cdp({"method": "Browser.downloadWillBegin", "params": params})
+            link.downloads[params["guid"]] = params["url"]
+            await self._send_cdp(link, {"method": "Browser.downloadWillBegin", "params": params})
         elif method == "Page.downloadProgress" and params.get("state") == "completed":
-            self._spawn(self._finish_download(params))
+            self._spawn(self._finish_download(link, params))
         elif method == "Page.downloadProgress" and params.get("state") == "canceled":
-            self._downloads.pop(params.get("guid", ""), None)
-            await self._send_cdp({"method": "Browser.downloadProgress", "params": params})
+            link.downloads.pop(params.get("guid", ""), None)
+            await self._send_cdp(link, {"method": "Browser.downloadProgress", "params": params})
 
         await self._send_cdp(
-            {"sessionId": child_session or tab.session_id, "method": method, "params": params}
+            link, {"sessionId": child_session or tab.session_id, "method": method, "params": params}
         )
 
-    async def _finish_download(self, progress: dict[str, Any]) -> None:
-        """O arquivo foi para a pasta Downloads da pessoa: copia para onde o Playwright espera
-        e tira de lá, para 500 linhas não deixarem 500 arquivos para trás."""
+    # ─── Downloads ────────────────────────────────────────────────────────
+
+    async def _finish_download(self, link: _Link, progress: dict[str, Any]) -> None:
+        """Traz o arquivo da pasta Downloads da pessoa para onde o Playwright espera e tira de
+        lá, para 500 linhas não deixarem 500 arquivos para trás."""
         guid = progress["guid"]
-        url = self._downloads.pop(guid, None)
+        url = link.downloads.pop(guid, None)
         state = "canceled"
         try:
-            if url is None or self._download_path is None:
+            if url is None or link.download_path is None:
                 raise RelayError("Download sem origem conhecida.")
-            found = await self._call_extension("finishDownload", url=url)
+            found = await self._call_extension(link, "finishDownload", url=url)
+            target = Path(link.download_path) / guid
             source = Path(found["path"])
-            if not source.is_file():
-                raise RelayError("O arquivo baixado não foi encontrado.")
-            await asyncio.to_thread(shutil.copyfile, source, Path(self._download_path) / guid)
-            await self._call_extension("removeDownload", downloadId=found["downloadId"])
+            if self._local_downloads and source.is_file():
+                await asyncio.to_thread(shutil.copyfile, source, target)
+            else:
+                # Worker em outra máquina: o conteúdo vem pela conexão
+                read = await self._call_extension(
+                    link, "readDownload", downloadId=found["downloadId"]
+                )
+                await asyncio.to_thread(target.write_bytes, _decode_download(read))
+            await self._call_extension(link, "removeDownload", downloadId=found["downloadId"])
             state = "completed"
-        except (RelayError, TimeoutError, OSError, KeyError):
+        except (RelayError, TimeoutError, OSError, KeyError, TypeError):
             logger.warning("Não consegui trazer um download do Chrome da pessoa.", exc_info=True)
         await self._send_cdp(
-            {"method": "Browser.downloadProgress", "params": {**progress, "state": state}}
+            link, {"method": "Browser.downloadProgress", "params": {**progress, "state": state}}
         )
 
     def _spawn(self, coroutine: Any) -> None:
         task = asyncio.ensure_future(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+
+def _bound_port(server: Server) -> int:
+    return next(iter(server.sockets)).getsockname()[1]
+
+
+def _decode_download(read: Any) -> bytes:
+    encoded = read.get("base64") if isinstance(read, dict) else None
+    if not isinstance(encoded, str) or len(encoded) > _MAX_DOWNLOAD_BYTES * 4 // 3 + 4:
+        raise RelayError("O arquivo baixado veio vazio ou grande demais.")
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise RelayError("O arquivo baixado veio corrompido.") from error

@@ -31,7 +31,7 @@ function PerguntaIa({ pedidoId, pergunta, aoResponder }) {
   return (
     <section
       aria-labelledby={idTitulo}
-      className="post-it relative px-5 pt-7 pb-5 motion-safe:animate-carimbar lg:-rotate-[1deg]"
+      className="post-it relative max-w-[620px] px-5 pt-7 pb-5 motion-safe:animate-carimbar"
     >
       <Fita className="-top-2.5 left-1/2 -translate-x-1/2 -rotate-2" />
       <h2 id={idTitulo} className="text-[13.5px] font-medium text-grafite">

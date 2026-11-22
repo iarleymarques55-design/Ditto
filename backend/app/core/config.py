@@ -5,6 +5,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 class Settings(BaseSettings):
@@ -64,6 +65,12 @@ class Settings(BaseSettings):
     # Porta em que o worker espera a extensão para rodar as tarefas no Chrome da pessoa.
     # Vazio: o worker abre um navegador próprio
     extension_runner_port: int | None = None
+    # Onde a porta da extensão escuta. 127.0.0.1 no seu computador; 0.0.0.0 em container ou
+    # no Ditto publicado. O lado do Playwright sempre fica só em 127.0.0.1
+    extension_relay_host: str = "127.0.0.1"
+    # Extensões aceitas, como ["chrome-extension://<id>"]. Vazio aceita qualquer extensão do
+    # Chrome (o token ainda é exigido); fora do computador local, é obrigatório preencher
+    extension_origins: list[str] = []
     # Só para os testes com o portal local: em produção o worker nunca acessa a rede interna
     allow_private_networks: bool = False
 
@@ -79,9 +86,17 @@ class Settings(BaseSettings):
     def _block_unsafe_production(self) -> Self:
         if self.environment == "production" and self.allow_private_networks:
             raise ValueError("ALLOW_PRIVATE_NETWORKS não pode ficar ligado em produção.")
-        if self.environment == "production" and self.extension_runner_port:
-            raise ValueError("EXTENSION_RUNNER_PORT é só para rodar no próprio computador.")
+        if self.relay_is_public and not self.extension_origins:
+            raise ValueError(
+                "Com a porta da extensão aberta para a rede, preencha EXTENSION_ORIGINS com o "
+                "endereço da extensão do Ditto (chrome-extension://<id>)."
+            )
         return self
+
+    @property
+    def relay_is_public(self) -> bool:
+        """A porta da extensão aceita conexões de fora desta máquina."""
+        return bool(self.extension_runner_port) and self.extension_relay_host not in _LOOPBACK
 
     @property
     def llm_enabled(self) -> bool:

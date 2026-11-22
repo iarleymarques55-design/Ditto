@@ -144,7 +144,7 @@ Quando um reparo funciona, o novo caminho é salvo. O LLM é chamado **uma vez**
 
 ## 🏗️ Arquitetura
 
-> Backend e painel estão implementados. A extensão ainda não existe: por enquanto, as gravações entram por um arquivo JSON importado no painel. Os detalhes estão no [README do backend](backend/README.md), e o resumo visual em [docs/ditto-implantado.png](docs/ditto-implantado.png).
+> Backend, painel e extensão do Chrome estão implementados: as tarefas são gravadas pela extensão ou criadas com IA no painel, e rodam no Chrome da pessoa. Os detalhes estão no [README do backend](backend/README.md) e no [README da extensão](extension/README.md); o resumo visual da última revisão está em [docs/revisao-2026-11-20.png](docs/revisao-2026-11-20.png).
 
 ```mermaid
 flowchart LR
@@ -238,6 +238,20 @@ npm run dev                  # em http://localhost:5173
 ```
 
 Para gravar, carregue o gravador no Chrome: em `chrome://extensions`, ligue o **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta `extension/`.
+
+### Tudo em containers (Docker)
+
+O [docker-compose.yml](docker-compose.yml) sobe banco, API, worker e painel de uma vez, com as mesmas portas do jeito acima (pare o uvicorn, o Vite e o worker locais antes).
+
+```bash
+copy .env.example .env               # defina DITTO_DB_PASSWORD e o id da extensão
+copy backend\.env.example backend\.env   # preencha JWT_SECRET e FERNET_KEYS
+docker compose up --build            # painel em http://localhost:5173
+```
+
+O banco do Docker fica na porta 5433, separado do Postgres do computador. O worker no container conversa com a extensão pela porta 8765, como faria publicado na nuvem.
+
+A cada push, o GitHub Actions ([ci.yml](.github/workflows/ci.yml)) roda lint, segurança e testes do backend, lint e build do painel, e monta as imagens Docker.
 
 ---
 

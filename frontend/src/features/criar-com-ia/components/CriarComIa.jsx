@@ -60,6 +60,7 @@ function Formulario({ idTitulo, aoFechar }) {
 
   async function enviar(evento) {
     evento.preventDefault()
+    if (enviando) return
     const url = normalizarEndereco(endereco)
     if (!url) {
       setErro('Este endereço não parece válido. Exemplo: https://portal.exemplo.gov.br')
@@ -83,32 +84,11 @@ function Formulario({ idTitulo, aoFechar }) {
         Criar uma tarefa com IA
       </h2>
       <p className={classeTexto}>
-        Escreva o que a tarefa faz. A IA abre o site numa aba ao lado e faz uma vez, passo a passo. Quando tiver dúvida, ela pergunta aqui no
-        painel. Senhas ela não digita.
+        A IA abre o site numa aba ao lado e faz a tarefa uma vez, passo a passo. Ela só pergunta o que não dá para decidir sozinha, e nunca
+        digita senhas.
       </p>
 
       <div className="mt-5">
-        <label htmlFor={idTexto} className={classeRotulo}>
-          O que a tarefa faz
-        </label>
-        <textarea
-          id={idTexto}
-          value={texto}
-          onChange={(evento) => setTexto(evento.target.value)}
-          required
-          minLength={10}
-          maxLength={2000}
-          rows={4}
-          placeholder={EXEMPLO}
-          aria-describedby={idDica}
-          data-foco-inicial
-          className={`${classeCampo} resize-y py-2 leading-relaxed`}
-        />
-        <p id={idDica} className="mt-1 text-[13.5px] text-grafite">
-          Diga o que digitar, onde clicar e quais dados guardar.
-        </p>
-      </div>
-      <div className="mt-4">
         <label htmlFor={idEndereco} className={classeRotulo}>
           Onde a tarefa começa
         </label>
@@ -122,12 +102,40 @@ function Formulario({ idTitulo, aoFechar }) {
           autoComplete="off"
           spellCheck="false"
           placeholder="https://www.scrapethissite.com/pages/forms/"
+          data-foco-inicial
           className={`${classeCampo} min-h-11`}
         />
       </div>
       <div className="mt-4">
-        <label htmlFor={idNome} className={classeRotulo}>
-          Nome da tarefa <span className="font-normal text-grafite">(opcional, a IA sugere um)</span>
+        <label htmlFor={idTexto} className={classeRotulo}>
+          O que a tarefa faz
+        </label>
+        <textarea
+          id={idTexto}
+          value={texto}
+          onChange={(evento) => setTexto(evento.target.value)}
+          onKeyDown={(evento) => {
+            if (evento.key === 'Enter' && (evento.ctrlKey || evento.metaKey)) evento.currentTarget.form.requestSubmit()
+          }}
+          required
+          minLength={10}
+          maxLength={2000}
+          rows={4}
+          placeholder={EXEMPLO}
+          aria-describedby={idDica}
+          className={`${classeCampo} resize-y py-2 leading-relaxed`}
+        />
+        <p id={idDica} className="mt-1 text-[13.5px] leading-relaxed text-grafite">
+          Diga o que digitar e quais dados guardar. Valores que você não informar, ela pergunta; se puder ser qualquer um, escreva “use
+          dados de exemplo”.
+        </p>
+      </div>
+      <details className="mt-4">
+        <summary className="inline-flex min-h-11 cursor-pointer items-center text-[14px] font-medium text-navy underline decoration-ink/60 underline-offset-4 hover:text-ink">
+          Dar um nome agora
+        </summary>
+        <label htmlFor={idNome} className={`${classeRotulo} mt-1 block`}>
+          Nome da tarefa <span className="font-normal text-grafite">(se ficar vazio, a IA sugere um)</span>
         </label>
         <input
           id={idNome}
@@ -137,7 +145,7 @@ function Formulario({ idTitulo, aoFechar }) {
           autoComplete="off"
           className={`${classeCampo} min-h-11`}
         />
-      </div>
+      </details>
 
       {erro && (
         <p role="alert" className="mt-3 text-[14.5px] font-medium text-rec-texto">
@@ -146,7 +154,7 @@ function Formulario({ idTitulo, aoFechar }) {
       )}
 
       <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <Botao type="submit" disabled={enviando}>
+        <Botao type="submit" disabled={enviando} title="Ctrl + Enter também envia">
           {enviando ? 'Enviando...' : 'Criar tarefa'}
         </Botao>
         <Botao variante="discreto" onClick={aoFechar}>

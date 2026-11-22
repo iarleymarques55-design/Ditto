@@ -403,5 +403,5 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 - **Armazenamento:** os arquivos ficam em disco. Em produção, precisa de um volume ou de um bucket.
 - **Recuperação de senha e confirmação de e-mail:** ainda não existem.
 - **Iframes:** gravar, repetir e capturar funcionam dentro deles, mas as camadas 2 e 3 de reparo só olham a página principal.
-- **Deploy:** não há Dockerfile ainda, e o proxy não substitui bloquear a saída para a rede interna no próprio ambiente.
+- **Deploy:** o [Dockerfile](Dockerfile) monta a API e o worker; o proxy não substitui bloquear a saída para a rede interna no próprio ambiente. No Railway, API e worker em serviços separados não dividem a pasta `STORAGE_DIR`: os arquivos gerados pelo worker ainda precisam de um armazenamento comum (volume compartilhado ou S3).
 - **Benchmark:** os pesos e o limiar da camada 2 são valores iniciais, sem calibração com sites reais.
