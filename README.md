@@ -67,13 +67,13 @@ Quando um reparo funciona, o novo caminho é salvo. O LLM é chamado **uma vez**
 
 ---
 
-## 🧪 Exemplo real
+## 🧪 Exemplo
 
-> Relatórios mensais de **25 lojas** no portal de um fornecedor: filtrar loja → selecionar mês → gerar → exportar PDF → renomear.
+> Exemplo ilustrativo: relatórios mensais de **25 lojas** no portal de um fornecedor (filtrar loja → selecionar mês → gerar → exportar PDF → renomear). Os números variam conforme o portal, a internet e o tamanho de cada relatório.
 
 | | Manual | Ditto |
 |---|---|---|
-| Tempo por mês | ~2 horas | **4 min 38 s** |
+| Tempo por mês | ~2 horas | **~5 min** |
 | Quando o portal mudou de layout | — | **1 reparo automático, 0 intervenções** |
 | Erro humano (mês errado, arquivo trocado) | Acontece | Validado por pós-condição |
 

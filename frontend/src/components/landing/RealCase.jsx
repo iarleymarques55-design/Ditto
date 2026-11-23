@@ -4,7 +4,7 @@ import Anotacao from './mesa/Anotacao.jsx'
 
 const comparacao = [
   { rotulo: 'Antes, todo mês', valor: '~2 horas', detalhe: 'feito à mão, loja por loja', cor: 'text-navy' },
-  { rotulo: 'Agora, com o Ditto', valor: '4 min 38 s', detalhe: 'roda às 07:10, antes de ela chegar', cor: 'text-ink' },
+  { rotulo: 'Com o Ditto', valor: '~5 min', detalhe: 'roda às 07:10, antes de ela chegar', cor: 'text-ink' },
 ]
 
 const lojas = [
@@ -150,16 +150,19 @@ function PortalMudou() {
 function RealCase() {
   const [antes, agora] = comparacao
   return (
-    <section id="exemplo" aria-labelledby="caso-real-titulo" className="pb-20 lg:pb-28">
+    <section id="exemplo" aria-labelledby="exemplo-titulo" className="pb-20 lg:pb-28">
       <div className="shell">
-        {/* Mata-borrão lavanda sobre a mesa: tudo do caso fica em cima dele */}
+        {/* Mata-borrão lavanda sobre a mesa: tudo do exemplo fica em cima dele */}
         <div className="rounded-[20px] bg-lavanda px-5 pt-10 pb-12 shadow-papel sm:px-8 lg:px-12 lg:pt-14 lg:pb-14">
-          <h2 id="caso-real-titulo" className="font-display text-[28px] leading-[1.15] font-bold text-navy sm:text-[34px]">
-            Um caso real: 25 relatórios todo dia 5
+          <h2 id="exemplo-titulo" className="font-display text-[28px] leading-[1.15] font-bold text-navy sm:text-[34px]">
+            Um exemplo: 25 relatórios todo dia 5
           </h2>
           <p className="mt-4 max-w-[600px] text-[15.5px] leading-[1.75]">
-            A Carla, do financeiro de uma rede com 25 lojas, entrava no portal do fornecedor e baixava o relatório de cada
-            loja, um por um. Ela gravou a tarefa uma vez e passou a planilha com as lojas.
+            Imagine a Carla, do financeiro de uma rede com 25 lojas. Todo mês ela entra no portal do fornecedor e baixa o
+            relatório de cada loja, um por um. Com o Ditto, ela grava a tarefa uma vez e passa a planilha com as lojas.
+          </p>
+          <p className="mt-2 max-w-[600px] text-[13.5px] leading-relaxed text-muted">
+            Exemplo ilustrativo. Os tempos variam conforme o portal, a internet e o tamanho de cada relatório.
           </p>
 
           <div className="mt-12 grid items-start gap-12 lg:grid-cols-[minmax(0,5fr)_auto_minmax(0,7fr)] lg:gap-6">

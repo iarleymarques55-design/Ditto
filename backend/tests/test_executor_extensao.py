@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from websockets.sync.client import connect
 
 from app.core.config import BACKEND_DIR, Settings
 from app.core.exceptions import UnauthorizedError
+from app.models.user import User
 from app.services.auth_service import AuthService
 from app.services.engine.browser import connect_user_browser
 from app.services.engine.extension_relay import ExtensionRelay
@@ -429,3 +431,54 @@ def test_extensao_so_manda_o_token_para_fora_com_criptografia(
     assert service_worker.evaluate(seguro, "ws://127.0.0.1:8765/extension") is True
     assert service_worker.evaluate(seguro, "ws://ditto.exemplo/extension") is False
     assert service_worker.evaluate(seguro, "https://ditto.exemplo/extension") is False
+
+
+# ---------- token roubado ou revogado ----------
+
+
+def test_segundo_chrome_da_mesma_conta_nao_toma_o_lugar_do_primeiro(
+    api: TestClient, autenticado: Cabecalho, rele: ExtensionRelay
+) -> None:
+    token = token_do_executor(api, autenticado)
+    primeiro = ExtensaoFalsa(rele.port, token)
+    try:
+        dono = id_da_conta(api, autenticado)
+        esperar(lambda: rele.connected_users() == [dono])
+
+        # Quem tem o mesmo token (vazado, por exemplo) não derruba o Chrome que está respondendo
+        with connect(
+            f"ws://127.0.0.1:{rele.port}/extension", origin="chrome-extension://ditto"
+        ) as intruso:
+            intruso.send(json.dumps({"type": "hello", "token": token}))
+            with pytest.raises(ConnectionClosed) as fechamento:
+                intruso.recv(timeout=ESPERA_S)
+        assert fechamento.value.rcvd is not None and fechamento.value.rcvd.code == 4409
+
+        assert rele.connected_users() == [dono]
+        assert primeiro.conexao.close_code is None
+    finally:
+        primeiro.fechar()
+
+
+def test_trocar_a_senha_derruba_o_chrome_ligado(
+    api: TestClient, autenticado: Cabecalho, fabrica_sessao: sessionmaker[Session]
+) -> None:
+    relay = ExtensionRelay(0, autenticador(fabrica_sessao), recheck_seconds=0.2)
+    relay.start()
+    chrome = None
+    try:
+        chrome = ExtensaoFalsa(relay.port, token_do_executor(api, autenticado))
+        dono = id_da_conta(api, autenticado)
+        esperar(lambda: relay.connected_users() == [dono])
+
+        # O mesmo que acontece ao trocar a senha ou sair de todas as sessões
+        with fabrica_sessao() as sessao:
+            sessao.get(User, dono).tokens_valid_after = datetime.now(UTC) + timedelta(seconds=5)
+            sessao.commit()
+
+        esperar(lambda: relay.connected_users() == [])
+        esperar(lambda: chrome.conexao.close_code == 4401)
+    finally:
+        if chrome is not None:
+            chrome.fechar()
+        relay.stop()

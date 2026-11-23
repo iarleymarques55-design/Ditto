@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, File, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
 from app.controllers.dependencies import (
     NOT_FOUND_RESPONSE,
@@ -60,7 +60,7 @@ def upload_avatar(
 
 @router.get(
     "/avatar",
-    response_class=FileResponse,
+    response_class=StreamingResponse,
     summary="Ver a foto de perfil",
     description="Devolve a foto da conta logada.",
     responses={
@@ -68,8 +68,8 @@ def upload_avatar(
         200: {"content": {"image/webp": {}}, "description": "A foto."},
     },
 )
-def get_avatar(user: CurrentUser, session: DbSession) -> FileResponse:
-    return FileResponse(AccountService(session).avatar_path(user), media_type="image/webp")
+def get_avatar(user: CurrentUser, session: DbSession) -> StreamingResponse:
+    return StreamingResponse(AccountService(session).avatar_content(user), media_type="image/webp")
 
 
 @router.delete(

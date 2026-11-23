@@ -126,7 +126,7 @@ function HowItWorks() {
               ))}
             </div>
             <p className="mt-4 max-w-[240px] text-[13px] leading-snug">
-              25 lojas, <mark className="bg-marca-texto px-0.5 text-body">4 min 38 s</mark>, salvas em relatorios/09-2026
+              25 lojas, <mark className="bg-marca-texto px-0.5 text-body">~5 min</mark>, salvas em relatorios/09-2026
             </p>
           </Etapa>
         </ol>

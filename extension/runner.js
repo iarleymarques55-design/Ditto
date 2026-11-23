@@ -10,6 +10,7 @@ const ESPERA_MAXIMA_MS = 30000
 const DOWNLOAD_LIMITE_MS = 110000
 const DOWNLOAD_RECENTE_MS = 10 * 60 * 1000
 const FECHAMENTO_TOKEN_RECUSADO = 4401
+const FECHAMENTO_CONTA_EM_USO = 4409
 
 // O token e o controle das abas viajam por aqui: fora deste computador, só com criptografia
 function releSeguro(endereco) {
@@ -23,7 +24,7 @@ function releSeguro(endereco) {
 }
 
 let socket = null
-let estadoExecutor = 'sem-token' // sem-token | conectando | conectado | desconectado | recusado
+let estadoExecutor = 'sem-token' // sem-token | conectando | conectado | desconectado | recusado | em-uso
 let espera = 1000
 let relogioPing = null
 let relogioReconexao = null
@@ -43,8 +44,20 @@ function enviarAoRele(mensagem) {
 
 // ─── Conexão com o worker ────────────────────────────────────────────────
 
-async function conectarExecutor() {
-  if (socket) return
+// Uma conexão de cada vez. Duas chamadas juntas (o painel ligando e o alarme acordando) passavam
+// as duas por "if (socket)" antes de qualquer uma abrir o socket: abriam dois, e o relé recusa o
+// segundo da mesma conta
+let conexaoEmAndamento = null
+
+function conectarExecutor() {
+  if (socket) return Promise.resolve()
+  conexaoEmAndamento ??= abrirConexao().finally(() => {
+    conexaoEmAndamento = null
+  })
+  return conexaoEmAndamento
+}
+
+async function abrirConexao() {
   const { [CHAVE_TOKEN]: token } = await chrome.storage.local.get(CHAVE_TOKEN)
   if (!token) {
     estadoExecutor = 'sem-token'
@@ -77,6 +90,11 @@ async function conectarExecutor() {
       estadoExecutor = 'recusado'
       return
     }
+    // Outro Chrome já está ligado nesta conta: tenta de novo só no alarme de cada minuto
+    if (evento.code === FECHAMENTO_CONTA_EM_USO) {
+      estadoExecutor = 'em-uso'
+      return
+    }
     estadoExecutor = 'desconectado'
     agendarReconexao()
   }
@@ -91,6 +109,8 @@ function agendarReconexao() {
 async function salvarTokenDoExecutor(token) {
   await chrome.storage.local.set({ [CHAVE_TOKEN]: token })
   espera = 1000
+  // Uma conexão que já estava abrindo, com o token antigo, termina antes e depois dá lugar à nova
+  await conexaoEmAndamento
   if (socket) {
     const antigo = socket
     socket = null

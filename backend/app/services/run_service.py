@@ -1,6 +1,7 @@
 import csv
 import io
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -180,8 +181,10 @@ class RunService:
         # A marca BOM faz o Excel reconhecer os acentos
         return f"execucao-{run.id}.csv", ("﻿" + buffer.getvalue()).encode("utf-8")
 
-    def get_artifact(self, artifact_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[Artifact, str]:
+    def get_artifact(
+        self, artifact_id: uuid.UUID, owner_id: uuid.UUID
+    ) -> tuple[Artifact, Iterator[bytes]]:
         artifact = self.runs.get_artifact_owned(artifact_id, owner_id)
         if artifact is None:
             raise NotFoundError("Arquivo não encontrado.")
-        return artifact, str(storage.path_for_read(artifact.storage_key))
+        return artifact, storage.open_for_read(artifact.storage_key)

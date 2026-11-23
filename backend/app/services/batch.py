@@ -1,9 +1,10 @@
 import csv
 import io
 import unicodedata
+from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.config import settings
@@ -32,18 +33,26 @@ def _read_csv(content: bytes) -> list[list[str]]:
 
 
 def _read_excel(content: bytes) -> list[list[str]]:
+    # As linhas só são lidas durante o laço (read_only): um XML malicioso ou quebrado dentro da
+    # planilha aparece ali, e não ao abrir. Os dois ficam dentro da mesma proteção
     try:
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    except (BadZipFile, InvalidFileException, KeyError, ValueError) as error:
+        try:
+            return _rows_until_limit(workbook)
+        finally:
+            workbook.close()
+    except (BadZipFile, InvalidFileException, KeyError, ValueError, ParseError) as error:
+        # Entidade XML recusada pelo defusedxml também é ValueError
         raise BusinessRuleError("Não foi possível ler esta planilha do Excel.") from error
 
+
+def _rows_until_limit(workbook: Workbook) -> list[list[str]]:
     # Para de ler logo depois do limite: um arquivo pequeno pode declarar milhões de linhas
     rows: list[list[str]] = []
     for row in workbook.active.iter_rows(values_only=True):
         rows.append(["" if cell is None else str(cell) for cell in row])
         if len(rows) > settings.max_batch_rows + 1:
             break
-    workbook.close()
     return rows
 
 

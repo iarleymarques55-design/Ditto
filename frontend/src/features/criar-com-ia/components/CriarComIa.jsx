@@ -20,7 +20,8 @@ const MOTIVOS_SEM_EXECUTOR = {
   'sem-extensao': 'A extensão do Ditto não está instalada neste Chrome.',
   'sem-resposta': 'A extensão do Ditto não respondeu. Recarregue esta página.',
   'sem-token': 'O executor está desligado.',
-  recusado: 'A ligação do executor expirou.',
+  recusado: 'A ligação do executor expirou ou foi encerrada.',
+  'em-uso': 'Outro Chrome já está ligado nesta conta. Abra o Criar com IA nele.',
   conectando: 'O executor está ligado, mas o worker não respondeu. Confira se ele está no ar.',
   desconectado: 'O executor está ligado, mas o worker não respondeu. Confira se ele está no ar.',
 }

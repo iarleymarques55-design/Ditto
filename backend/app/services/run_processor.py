@@ -2,8 +2,10 @@
 
 import json
 import logging
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -351,13 +353,14 @@ class RunProcessor:
         suggested = f"{item.position:03d}-{outcome.download.suggested_filename}"
         relative = safe_relative_path(step.save_as, values, suggested)
         key = f"{self.run.owner_id}/{self.run.id}/{relative}"
-        path = storage.path_for_write(key)
-        outcome.download.save_as(path)
-
-        size = path.stat().st_size
-        if size > _MAX_DOWNLOAD_BYTES:
-            storage.delete(key)
-            raise BusinessRuleError("O arquivo baixado passa do tamanho permitido.")
+        # O navegador entrega o arquivo no disco; dali ele vai para o destino configurado (pasta
+        # ou bucket), só depois de passar no limite de tamanho
+        with tempfile.TemporaryDirectory(prefix="ditto-download-") as folder:
+            downloaded = Path(folder) / "arquivo"
+            outcome.download.save_as(downloaded)
+            if downloaded.stat().st_size > _MAX_DOWNLOAD_BYTES:
+                raise BusinessRuleError("O arquivo baixado passa do tamanho permitido.")
+            size = storage.save_file(key, downloaded)
 
         self.session.add(
             Artifact(

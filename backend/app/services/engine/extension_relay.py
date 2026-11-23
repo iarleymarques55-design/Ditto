@@ -43,6 +43,12 @@ _MAX_CONNECTIONS = 500
 _CLOSE_POLICY = 1008
 _CLOSE_TRY_LATER = 1013
 _CLOSE_UNAUTHORIZED = 4401
+_CLOSE_IN_USE = 4409
+# De quanto em quanto tempo o token de cada conexão é conferido de novo: senha trocada ou
+# "sair de todas as sessões" derruba também o Chrome ligado
+_RECHECK_SECONDS = 60
+# Tempo para a conexão antiga provar que está viva antes de uma nova assumir o lugar dela
+_ALIVE_SECONDS = 3
 _BROWSER_TARGET = {
     "targetId": "ditto-browser",
     "type": "browser",
@@ -72,6 +78,8 @@ class _Link:
 
     user_id: uuid.UUID
     extension: ServerConnection
+    # Guardado só para conferir de novo, de tempos em tempos, se ele ainda vale
+    token: str
     cdp: ServerConnection | None = None
     next_id: int = 0
     pending: dict[int, asyncio.Future[Any]] = field(default_factory=dict)
@@ -89,10 +97,12 @@ class ExtensionRelay:
         host: str = "127.0.0.1",
         allowed_origins: list[str] | None = None,
         local_downloads: bool = True,
+        recheck_seconds: float = _RECHECK_SECONDS,
     ) -> None:
         self.host = host
         self.port = port
         self._authenticate = authenticate
+        self._recheck_seconds = recheck_seconds
         # Vazio: qualquer extensão do Chrome pode tentar (o token ainda é exigido)
         self._allowed_origins = set(allowed_origins or [])
         # Worker e Chrome na mesma máquina: o arquivo baixado é copiado direto da pasta dele
@@ -107,6 +117,9 @@ class ExtensionRelay:
         self._startup_error: BaseException | None = None
 
         self._links: dict[uuid.UUID, _Link] = {}
+        # Cópia que as linhas de trabalho do worker leem de outras threads: trocada inteira, nunca
+        # alterada, para ninguém ler a lista no meio de uma mudança
+        self._connected: tuple[uuid.UUID, ...] = ()
         self._connections = 0
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -114,7 +127,7 @@ class ExtensionRelay:
 
     def connected_users(self) -> list[uuid.UUID]:
         """As contas com a extensão ligada agora."""
-        return list(self._links)
+        return list(self._connected)
 
     def cdp_url_for(self, user_id: uuid.UUID) -> str:
         return f"ws://127.0.0.1:{self._cdp_port}/cdp/{self._secret}/{user_id}"
@@ -151,10 +164,31 @@ class ExtensionRelay:
                 self.port = _bound_port(extension_server)
                 self._cdp_port = _bound_port(cdp_server)
                 started.set()
-                await self._stopping.wait()
+                recheck = asyncio.ensure_future(self._recheck_tokens())
+                try:
+                    await self._stopping.wait()
+                finally:
+                    recheck.cancel()
         except OSError as error:
             self._startup_error = error
             started.set()
+
+    async def _recheck_tokens(self) -> None:
+        """Um token conferido só na hora de conectar valeria para sempre naquela conexão."""
+        while True:
+            await asyncio.sleep(self._recheck_seconds)
+            for link in list(self._links.values()):
+                try:
+                    user_id = await asyncio.to_thread(self._authenticate, link.token)
+                except Exception:
+                    # O banco pode ter caído por um instante: confere de novo na próxima volta
+                    logger.warning("Não consegui conferir o token do executor.", exc_info=True)
+                    continue
+                if user_id != link.user_id and self._links.get(link.user_id) is link:
+                    logger.info("Token do executor revogado: a conexão da extensão foi encerrada.")
+                    await self._drop(
+                        link, "Token revogado. Conecte de novo pelo painel.", _CLOSE_UNAUTHORIZED
+                    )
 
     # ─── Lado da extensão ─────────────────────────────────────────────────
 
@@ -199,10 +233,21 @@ class ExtensionRelay:
 
         old = self._links.get(user_id)
         if old is not None:
-            # O service worker da extensão reiniciou: a conexão nova vale
+            if await _is_alive(old.extension):
+                # Já há um Chrome ligado e respondendo nesta conta. Derrubá-lo deixaria quem tem
+                # um token vazado tomar o lugar dele e receber o que o worker digita nos sites
+                logger.warning(
+                    "Segunda conexão da extensão recusada: a conta já tem um Chrome ligado."
+                )
+                await connection.close(
+                    _CLOSE_IN_USE, "Outro Chrome já está ligado nesta conta. Desligue-o antes."
+                )
+                return
+            # A conexão antiga morreu sem avisar (service worker reiniciou, rede caiu): a nova vale
             await self._drop(old, "Outra conexão da extensão assumiu.")
-        link = _Link(user_id, connection)
+        link = _Link(user_id, connection, token)
         self._links[user_id] = link
+        self._connected = tuple(self._links)
         # Depois do token, cabem as capturas de tela e os arquivos baixados. Vale a partir do
         # próximo quadro, e a extensão só manda algo depois do "welcome"
         connection.protocol.max_message_size = _MAX_MESSAGE_BYTES
@@ -219,15 +264,16 @@ class ExtensionRelay:
                 await self._drop(link, "A extensão desconectou.")
                 logger.info("Extensão desconectada: as execuções desta conta esperam na fila.")
 
-    async def _drop(self, link: _Link, reason: str) -> None:
+    async def _drop(self, link: _Link, reason: str, code: int = 1000) -> None:
         if self._links.get(link.user_id) is link:
             del self._links[link.user_id]
+            self._connected = tuple(self._links)
         for future in link.pending.values():
             if not future.done():
                 future.set_exception(RelayError(reason))
         link.pending.clear()
         link.tabs.clear()
-        await link.extension.close(1000, reason)
+        await link.extension.close(code, reason)
         if link.cdp is not None:
             await link.cdp.close(1000, reason)
 
@@ -493,6 +539,16 @@ class ExtensionRelay:
         task = asyncio.ensure_future(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+
+async def _is_alive(connection: ServerConnection) -> bool:
+    """A conexão responde a um ping? Fechada, caída ou muda conta como morta."""
+    try:
+        pong = await connection.ping()
+        await asyncio.wait_for(pong, _ALIVE_SECONDS)
+    except (ConnectionClosed, TimeoutError):
+        return False
+    return True
 
 
 def _bound_port(server: Server) -> int:
