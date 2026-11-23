@@ -583,3 +583,38 @@ def test_nenhum_segredo_de_configuracao_aparece_no_repr() -> None:
     texto = repr(settings)
     assert settings.jwt_secret.get_secret_value() not in texto
     assert settings.fernet_keys.get_secret_value() not in texto
+
+
+def _login_vindo_de(api: TestClient, encaminhado: str, numero: int) -> int:
+    resposta = api.post(
+        "/api/v1/auth/login",
+        json={"email": f"ip{numero}@teste.com", "password": "errada"},
+        headers={"X-Forwarded-For": encaminhado},
+    )
+    return resposta.status_code
+
+
+def test_sem_proxy_configurado_ninguem_escolhe_o_proprio_ip(api: TestClient) -> None:
+    # Trocar o X-Forwarded-For a cada tentativa não fura o limite: o cabeçalho é ignorado
+    codigos = [_login_vindo_de(api, f"10.0.0.{i}", i) for i in range(21)]
+    assert codigos[-1] == 429
+
+
+def test_atras_do_proxy_cada_pessoa_tem_o_proprio_limite(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    # Vinte tentativas de uma pessoa esgotam o limite só dela
+    codigos = [_login_vindo_de(api, "203.0.113.7", i) for i in range(21)]
+    assert codigos[-1] == 429
+    # Outra pessoa, atrás do mesmo proxy, continua entrando normalmente
+    assert _login_vindo_de(api, "198.51.100.9", 99) == 401
+
+
+def test_ip_inventado_pelo_cliente_nao_fura_o_limite_atras_do_proxy(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
+    # O cliente escreve o começo da lista; o proxy acrescenta o IP real no fim
+    codigos = [_login_vindo_de(api, f"1.1.1.{i}, 203.0.113.7", i) for i in range(21)]
+    assert codigos[-1] == 429

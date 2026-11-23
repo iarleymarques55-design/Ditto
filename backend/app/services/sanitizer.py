@@ -9,6 +9,7 @@ from app.services.engine.snapshot import PageElement
 
 MAX_ELEMENTS = 150
 MAX_TEXT = 120
+MAX_SCREEN_TEXT = 1500
 _MIN_SECRET_LENGTH = 3
 
 
@@ -109,6 +110,23 @@ def _page_address(url: str) -> str:
     return url.split("?", 1)[0].split("#", 1)[0][:300]
 
 
+_FIELD_ROLES = {"textbox", "searchbox", "combobox", "listbox", "checkbox", "radio", "switch"}
+
+
+def _most_useful(elements: list[PageElement]) -> list[PageElement]:
+    """Num site com barra lateral cheia de links (como o histórico de um chat), cortar pela ordem
+    da página deixava a caixa de texto de fora, e a IA perguntava à pessoa onde ela estava.
+    Campos vêm primeiro, depois o conteúdo, e por último menus e barras laterais."""
+
+    def rank(element: PageElement) -> int:
+        if element.role in _FIELD_ROLES:
+            return 0
+        return 2 if element.in_menu else 1
+
+    chosen = sorted(elements, key=rank)[:MAX_ELEMENTS]
+    return sorted(chosen, key=lambda element: element.index)
+
+
 def build_explorer_payload(
     *,
     prompt: str,
@@ -122,6 +140,9 @@ def build_explorer_payload(
     elements: list[PageElement],
     options: dict[int, list[str]],
     screen_data: list[Any],
+    screen_text: str = "",
+    spreadsheet: bool = False,
+    questions_left: int = 0,
     secrets: Iterable[str] = (),
 ) -> str:
     """Monta o pedido da IA que cria tarefas. O valor dos campos nunca é coletado (snapshot.py)."""
@@ -130,10 +151,17 @@ def build_explorer_payload(
         "pedido_da_pessoa": scrub(prompt, protected)[:2000],
         "endereco_atual": _short(_page_address(url), protected),
         "titulo_da_pagina": _short(title, protected),
+        # Sem o texto da tela a IA só vê botões e campos, e passa a supor o resultado de cada passo
+        "texto_da_tela": scrub(screen_text, protected)[:MAX_SCREEN_TEXT],
+        "planilha_excel_aberta": spreadsheet,
+        "perguntas_restantes": questions_left,
         "passos_ja_feitos": [_short(item, protected) for item in done[-30:]],
         "resultado_do_ultimo_passo": _short(last_result, protected),
         "respostas_da_pessoa": [
-            {"pergunta": _short(item["pergunta"], protected), "resposta": _short(item["resposta"], protected)}
+            {
+                "pergunta": _short(item["pergunta"], protected),
+                "resposta": _short(item["resposta"], protected),
+            }
             for item in answers[-10:]
         ],
         "dados_ja_guardados": [_short(item, protected) for item in captured],
@@ -147,13 +175,15 @@ def build_explorer_payload(
                 "rotulo": _short(element.label, protected),
                 "dica": _short(element.placeholder, protected),
                 "tipo": element.input_type,
+                **({"no_menu": True} if element.in_menu else {}),
+                **({"pergunta": _short(element.group, protected)} if element.group else {}),
                 **(
                     {"opcoes": [_short(item, protected) for item in options[element.index]]}
                     if element.index in options
                     else {}
                 ),
             }
-            for element in elements[:MAX_ELEMENTS]
+            for element in _most_useful(elements)
         ],
         "dados_na_tela": [
             (

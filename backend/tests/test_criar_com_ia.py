@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from playwright.sync_api import Browser
+from playwright.sync_api import Error as PlaywrightError
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -26,6 +27,10 @@ from app.models.user import User
 from app.schemas.ai_draft import AiDraftAnswer
 from app.services import ai_explorer
 from app.services.ai_draft_service import AiDraftService
+from app.services.ai_explorer import BrowserUnavailableError
+from app.services.analyzer import analyze_flow
+from app.services.engine.browser import new_guarded_context
+from app.services.engine.executor import StepPlan, StepRunner
 from app.services.engine.llm_explorer import LlmExplorer
 from app.services.worker_tasks import fail_stale_drafts, process_next_draft
 from tests.fixtures.portal import Portal
@@ -74,7 +79,9 @@ def no_elemento(texto: str, **decisao: Any) -> Callable[[dict[str, Any]], dict[s
     return lambda dados: {**decisao, "indice": elemento(texto)(dados)}
 
 
-def no_dado(tipo: str, rotulo: str | None, **decisao: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
+def no_dado(
+    tipo: str, rotulo: str | None, **decisao: Any
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
     return lambda dados: {**decisao, "dado": dado(tipo, rotulo)(dados)}
 
 
@@ -116,7 +123,9 @@ def criar_rascunho(
     return criar
 
 
-def rodar(fabrica: sessionmaker[Session], navegador: Browser, dono: uuid.UUID, ia: IaDeRoteiro) -> bool:
+def rodar(
+    fabrica: sessionmaker[Session], navegador: Browser, dono: uuid.UUID, ia: IaDeRoteiro
+) -> bool:
     return process_next_draft(fabrica, navegador, dono, LlmExplorer(ia))
 
 
@@ -150,7 +159,9 @@ def responder(
                         perguntas.append(atual.question["text"])
                         servico = AiDraftService(sessao)
                         if pendentes:
-                            servico.answer(rascunho_id, dono, AiDraftAnswer(answer=pendentes.pop(0)))
+                            servico.answer(
+                                rascunho_id, dono, AiDraftAnswer(answer=pendentes.pop(0))
+                            )
                         else:
                             servico.cancel(rascunho_id, dono)
                             return
@@ -208,7 +219,7 @@ def test_valor_que_nao_veio_do_pedido_espera_a_pessoa(
     criar_rascunho: Callable[[str, str], uuid.UUID],
     responder: Callable[..., list[str]],
 ) -> None:
-    rascunho_id = criar_rascunho("Consulte um CNPJ no portal e guarde a situação.", "/busca")
+    rascunho_id = criar_rascunho("Consulte um CNPJ no portal.", "/busca")
     perguntas = responder(rascunho_id, "Pode digitar")
     ia = IaDeRoteiro(
         no_elemento("CNPJ", acao="digitar", valor="222"),
@@ -395,10 +406,15 @@ def ia_ligada(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "extension_runner_port", 8765)
 
 
-PEDIDO = {"prompt": "Consulte o CNPJ 111 e guarde a situação.", "start_url": "https://portal.exemplo/busca"}
+PEDIDO = {
+    "prompt": "Consulte o CNPJ 111 e guarde a situação.",
+    "start_url": "https://portal.exemplo/busca",
+}
 
 
-def test_api_sem_ia_configurada_explica_o_que_falta(api: TestClient, autenticado: Cabecalho) -> None:
+def test_api_sem_ia_configurada_explica_o_que_falta(
+    api: TestClient, autenticado: Cabecalho
+) -> None:
     resposta = api.post("/api/v1/ai-drafts", json=PEDIDO, headers=autenticado)
     assert resposta.status_code == 503
     assert "LLM_API_KEY" in resposta.json()["detail"]
@@ -464,7 +480,7 @@ def test_ia_ve_e_usa_o_que_esta_dentro_de_iframe(
     assert [passo["action"] for passo in rascunho.steps] == ["navigate", "click", "capture"]
 
 
-def test_ia_escreve_celulas_no_excel_com_uma_confirmacao_por_lote(
+def test_planilha_de_exemplo_e_escrita_sem_perguntar(
     fabrica_sessao: sessionmaker[Session],
     navegador: Browser,
     dono: uuid.UUID,
@@ -475,7 +491,6 @@ def test_ia_escreve_celulas_no_excel_com_uma_confirmacao_por_lote(
     rascunho_id = criar_rascunho(
         "Crie uma planilha de países e capitais, escolha do seu jeito.", "/planilha"
     )
-    perguntas = responder(rascunho_id, "Pode escrever")
     celulas = [
         {"celula": "A1", "valor": "País"},
         {"celula": "B1", "valor": "Capital"},
@@ -488,10 +503,13 @@ def test_ia_escreve_celulas_no_excel_com_uma_confirmacao_por_lote(
 
     rascunho = ler(fabrica_sessao, rascunho_id)
     assert rascunho.status == AiDraftStatus.DONE, rascunho.error
-    assert len(perguntas) == 1
-    assert 'A1 "País"' in perguntas[0]
+    # "escolha do seu jeito" deixa os valores com a IA: nenhuma pergunta sobre eles
+    assert "question" not in [evento["kind"] for evento in rascunho.events]
     assert portal.planilha == {"A1": "País", "B1": "Capital", "A2": "Brasil", "B2": "Brasília"}
-    partes = [(passo.get("spreadsheet_cell"), passo.get("spreadsheet_part")) for passo in rascunho.steps[1:]]
+    partes = [
+        (passo.get("spreadsheet_cell"), passo.get("spreadsheet_part"))
+        for passo in rascunho.steps[1:]
+    ]
     assert partes[:2] == [("A1", "address"), ("A1", "value")]
     assert len(partes) == 8
     with fabrica_sessao() as sessao:
@@ -508,13 +526,14 @@ def test_celulas_recusadas_nao_sao_escritas(
     criar_rascunho: Callable[[str, str], uuid.UUID],
     responder: Callable[..., list[str]],
 ) -> None:
-    rascunho_id = criar_rascunho("Crie uma planilha qualquer.", "/planilha")
-    responder(rascunho_id, "Não escreva")
+    rascunho_id = criar_rascunho("Crie a planilha de vendas.", "/planilha")
+    perguntas = responder(rascunho_id, "Não escreva")
     ia = IaDeRoteiro({"acao": "escrever_celulas", "celulas": [{"celula": "A1", "valor": "golpe"}]})
 
     rodar(fabrica_sessao, navegador, dono, ia)
 
     assert portal.planilha == {}
+    assert 'A1 "golpe"' in perguntas[0]
     assert "não aprovou" in ia.pedidos[-1]["resultado_do_ultimo_passo"]
     assert ler(fabrica_sessao, rascunho_id).status == AiDraftStatus.FAILED
 
@@ -542,3 +561,334 @@ def test_aba_nova_em_outro_dominio_pergunta_em_vez_de_sumir(
     assert rascunho.allowed_hosts == ["localhost", "127.0.0.1"]
     with fabrica_sessao() as sessao:
         assert "127.0.0.1" in sessao.get(Flow, rascunho.flow_id).allowed_domains
+
+
+# ---------- menos perguntas e nada de supor o resultado ----------
+
+
+def test_valor_de_exemplo_e_digitado_sem_perguntar(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+) -> None:
+    rascunho_id = criar_rascunho("Consulte um CNPJ de exemplo no portal.", "/busca")
+    ia = IaDeRoteiro(
+        no_elemento("CNPJ", acao="digitar", valor="222"),
+        no_elemento("Consultar", acao="clicar"),
+        CONCLUIR,
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    rascunho = ler(fabrica_sessao, rascunho_id)
+    assert rascunho.status == AiDraftStatus.DONE, rascunho.error
+    assert "question" not in [evento["kind"] for evento in rascunho.events]
+    assert rascunho.steps[1]["value"] == "222"
+
+
+def test_ia_pergunta_no_maximo_tres_vezes_e_nunca_repete(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+    responder: Callable[..., list[str]],
+) -> None:
+    rascunho_id = criar_rascunho("Consulte o CNPJ 111.", "/busca")
+    perguntas = responder(rascunho_id, "A", "B", "C")
+    ia = IaDeRoteiro(
+        {"acao": "perguntar", "pergunta": "Primeira?", "opcoes": ["A"]},
+        {"acao": "perguntar", "pergunta": "primeira?", "opcoes": ["A"]},
+        {"acao": "perguntar", "pergunta": "Segunda?", "opcoes": ["B"]},
+        {"acao": "perguntar", "pergunta": "Terceira?", "opcoes": ["C"]},
+        {"acao": "perguntar", "pergunta": "Quarta?", "opcoes": ["D"]},
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    assert perguntas == ["Primeira?", "Segunda?", "Terceira?"]
+    resultados = [pedido["resultado_do_ultimo_passo"] for pedido in ia.pedidos]
+    assert "já respondeu isso: A" in resultados[2]
+    assert "acabaram as perguntas" in resultados[5]
+    assert [pedido["perguntas_restantes"] for pedido in ia.pedidos[:2]] == [3, 2]
+
+
+def test_concluir_sem_guardar_o_dado_pedido_recebe_um_aviso(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+) -> None:
+    rascunho_id = criar_rascunho("Consulte o CNPJ 111 e guarde a situação.", "/busca")
+    ia = IaDeRoteiro(
+        no_elemento("CNPJ", acao="digitar", valor="111"),
+        no_elemento("Consultar", acao="clicar"),
+        CONCLUIR,
+        no_dado("valor", "Situação", acao="capturar_valor", nome_do_dado="Situação"),
+        CONCLUIR,
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    assert "nenhum dado foi guardado" in ia.pedidos[3]["resultado_do_ultimo_passo"]
+    rascunho = ler(fabrica_sessao, rascunho_id)
+    assert rascunho.status == AiDraftStatus.DONE, rascunho.error
+    assert rascunho.steps[-1]["action"] == "capture"
+
+
+def test_ia_le_a_tela_e_sabe_quando_o_clique_nao_fez_nada(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+) -> None:
+    rascunho_id = criar_rascunho("Consulte o CNPJ 111.", "/busca")
+    ia = IaDeRoteiro(
+        no_elemento("CNPJ", acao="clicar", descricao="Guardar a tabela de notas"),
+        no_elemento("CNPJ", acao="digitar", valor="111"),
+        no_elemento("Consultar", acao="clicar"),
+        CONCLUIR,
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    assert "nada mudou" in ia.pedidos[1]["resultado_do_ultimo_passo"]
+    assert "tela mudou" in ia.pedidos[3]["resultado_do_ultimo_passo"]
+    assert "Situação" in ia.pedidos[3]["texto_da_tela"]
+    # O que está digitado nos campos nunca vai no texto da tela
+    assert "111" not in ia.pedidos[2]["texto_da_tela"]
+    # O passo anotado diz o que foi feito, e não o que a IA disse que fazia
+    passos = [
+        evento["text"]
+        for evento in ler(fabrica_sessao, rascunho_id).events
+        if evento["kind"] == "step"
+    ]
+    assert passos[1] == 'Clicar em "CNPJ"'
+    assert all("tabela" not in passo for passo in passos)
+
+
+def test_ia_acha_a_caixa_de_mensagem_de_um_chat_sem_perguntar(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+    responder: Callable[..., list[str]],
+) -> None:
+    rascunho_id = criar_rascunho("Mande a mensagem frutas doces no chat.", "/chat")
+    perguntas = responder(rascunho_id, "Pode clicar")
+    ia = IaDeRoteiro(
+        no_elemento("Mensagem", acao="digitar", valor="frutas doces"),
+        no_elemento("Enviar", acao="clicar"),
+        CONCLUIR,
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    rascunho = ler(fabrica_sessao, rascunho_id)
+    assert rascunho.status == AiDraftStatus.DONE, rascunho.error
+    # Só a trava de segurança do "Enviar" pergunta; achar a caixa não depende da pessoa
+    assert len(perguntas) == 1
+    assert "pode não ter volta" in perguntas[0]
+    primeiro = ia.pedidos[0]["elementos_da_pagina"]
+    caixa = next(item for item in primeiro if item["rotulo"] == "Mensagem")
+    # Editor aparece como campo, com a dica de texto, mesmo com 220 links na barra lateral
+    assert caixa["papel"] == "textbox"
+    assert caixa["dica"] == "Como posso ajudar?"
+    assert any(item["texto"] == "Enviar" for item in primeiro)
+    # O que foi escrito no editor nunca vai para a IA como texto do elemento
+    segundo = ia.pedidos[1]["elementos_da_pagina"]
+    assert next(item for item in segundo if item["rotulo"] == "Mensagem")["texto"] == ""
+    assert "Resposta: frutas doces" in ia.pedidos[2]["texto_da_tela"]
+    assert rascunho.steps[1]["action"] == "fill"
+
+
+class NavegadorCaido:
+    """Uma ligação com o Chrome que morreu sem o Playwright perceber."""
+
+    def new_context(self, **_opcoes: Any) -> None:
+        raise PlaywrightError("Target page, context or browser has been closed")
+
+
+def test_chrome_que_caiu_antes_de_comecar_volta_para_a_fila_uma_vez(
+    fabrica_sessao: sessionmaker[Session],
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+) -> None:
+    rascunho_id = criar_rascunho("Consulte o CNPJ 111.", "/busca")
+    ia = LlmExplorer(IaDeRoteiro())
+
+    with pytest.raises(BrowserUnavailableError):
+        process_next_draft(fabrica_sessao, NavegadorCaido(), dono, ia)
+    assert ler(fabrica_sessao, rascunho_id).status == AiDraftStatus.QUEUED
+
+    # Caiu de novo depois de reconectar: aí o pedido falha com uma explicação
+    with pytest.raises(BrowserUnavailableError):
+        process_next_draft(fabrica_sessao, NavegadorCaido(), dono, ia)
+    rascunho = ler(fabrica_sessao, rascunho_id)
+    assert rascunho.status == AiDraftStatus.FAILED
+    assert "extensão" in rascunho.error
+
+
+# ---------- Google Forms ----------
+
+
+def na_pergunta(
+    pergunta: str, rotulo: str, **decisao: Any
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A opção certa quando várias perguntas têm opções com o mesmo nome, como "Sim" e "Não"."""
+
+    def achar(dados: dict[str, Any]) -> dict[str, Any]:
+        for item in dados["elementos_da_pagina"]:
+            if item["rotulo"] == rotulo and item.get("pergunta") == pergunta:
+                return {**decisao, "indice": item["indice"]}
+        raise AssertionError(f"{rotulo} de {pergunta} não está na página")
+
+    return achar
+
+
+FORMULARIO = {
+    "nome": "Ana Souza",
+    "email": "ana@exemplo.com",
+    "cliente": "Sim",
+    "novidades": "Não",
+    "interesses": "Relatórios",
+    "estado": "Bahia",
+    "data": "2026-12-01",
+}
+
+
+def test_ia_ve_o_nome_de_cada_pergunta_do_google_forms(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+) -> None:
+    criar_rascunho("Preencha o formulário com o nome Ana Souza.", "/formulario-google")
+    ia = IaDeRoteiro()
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    elementos = ia.pedidos[0]["elementos_da_pagina"]
+    rotulos = {item["rotulo"] for item in elementos if item["papel"] == "textbox"}
+    # O nome vem do título da pergunta, sem o asterisco de obrigatória
+    assert {"Nome completo", "E-mail", "Data da visita"} <= rotulos
+    opcoes = {
+        (item.get("pergunta"), item["rotulo"]) for item in elementos if item["papel"] == "radio"
+    }
+    assert opcoes == {
+        ("Você já é cliente?", "Sim"),
+        ("Você já é cliente?", "Não"),
+        ("Quer receber novidades?", "Sim"),
+        ("Quer receber novidades?", "Não"),
+    }
+    caixas = {
+        (item.get("pergunta"), item["rotulo"]) for item in elementos if item["papel"] == "checkbox"
+    }
+    assert caixas == {("Interesses", "Planilhas"), ("Interesses", "Relatórios")}
+    lista = next(item for item in elementos if item["papel"] == "listbox")
+    assert lista["rotulo"] == "Estado"
+    # A opção escolhida é valor de campo: não vai para a IA como texto da lista
+    assert lista["texto"] == ""
+    assert lista["opcoes"] == ["São Paulo", "Bahia"]
+
+
+def test_ia_preenche_o_google_forms_e_a_tarefa_repete_igual(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    portal: Portal,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+    responder: Callable[..., list[str]],
+) -> None:
+    rascunho_id = criar_rascunho(
+        "Preencha o formulário: nome Ana Souza, e-mail ana@exemplo.com, já é cliente Sim, "
+        "novidades Não, interesse Relatórios, estado Bahia, data 2026-12-01. Depois envie.",
+        "/formulario-google",
+    )
+    perguntas = responder(rascunho_id, "Pode clicar")
+    ia = IaDeRoteiro(
+        no_elemento("Nome completo", acao="digitar", valor="Ana Souza"),
+        no_elemento("E-mail", acao="digitar", valor="ana@exemplo.com"),
+        na_pergunta("Você já é cliente?", "Sim", acao="marcar"),
+        na_pergunta("Quer receber novidades?", "Não", acao="marcar"),
+        na_pergunta("Interesses", "Relatórios", acao="marcar"),
+        no_elemento("Estado", acao="escolher", valor="Bahia"),
+        no_elemento("Data da visita", acao="digitar", valor="2026-12-01"),
+        no_elemento("Enviar", acao="clicar"),
+        CONCLUIR,
+    )
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    rascunho = ler(fabrica_sessao, rascunho_id)
+    assert rascunho.status == AiDraftStatus.DONE, rascunho.error
+    # Só a trava do botão sem volta pergunta; todos os valores vieram do pedido
+    assert len(perguntas) == 1 and "pode não ter volta" in perguntas[0]
+    assert portal.formularios == [FORMULARIO]
+    passos = [evento["text"] for evento in rascunho.events if evento["kind"] == "step"]
+    assert 'Digitar "Ana Souza" em "Nome completo"' in passos
+    assert 'Marcar "Não" em "Quer receber novidades?"' in passos
+    assert 'Escolher "Bahia" em "Estado"' in passos
+
+    # A gravação serve para repetir: o executor refaz tudo sozinho, sem a IA
+    with fabrica_sessao() as sessao:
+        tarefa = sessao.get(Flow, rascunho.flow_id)
+        analyze_flow(sessao, tarefa)
+        contexto = new_guarded_context(navegador, ["localhost"])
+        pagina = contexto.new_page()
+        pagina.goto(tarefa.start_url)
+        executor = StepRunner(pagina)
+        for passo in tarefa.steps[1:]:
+            alvo = next(versao.target for versao in passo.versions if versao.is_current)
+            resultado = executor.run(
+                StepPlan(
+                    position=passo.position,
+                    action=passo.action,
+                    intent=passo.intent,
+                    postcondition=passo.postcondition,
+                    value=passo.value_template,
+                    url=None,
+                    irreversible=False,
+                    targets=[alvo],
+                    allowed_domains=["localhost"],
+                )
+            )
+            assert resultado.status == "ok", f"{passo.intent}: {resultado.message}"
+        contexto.close()
+    assert portal.formularios == [FORMULARIO, FORMULARIO]
+
+
+def test_pergunta_obrigatoria_sem_resposta_aparece_para_a_ia(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    portal: Portal,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+    responder: Callable[..., list[str]],
+) -> None:
+    rascunho_id = criar_rascunho("Envie o formulário.", "/formulario-google")
+    responder(rascunho_id, "Pode clicar")
+    ia = IaDeRoteiro(no_elemento("Enviar", acao="clicar"))
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    assert portal.formularios == []
+    assert "Esta pergunta é obrigatória" in ia.pedidos[1]["texto_da_tela"]
+
+
+def test_opcao_que_nao_veio_do_pedido_espera_a_pessoa(
+    fabrica_sessao: sessionmaker[Session],
+    navegador: Browser,
+    dono: uuid.UUID,
+    criar_rascunho: Callable[[str, str], uuid.UUID],
+    responder: Callable[..., list[str]],
+) -> None:
+    rascunho_id = criar_rascunho("Preencha o formulário com o nome Ana.", "/formulario-google")
+    perguntas = responder(rascunho_id, "Não, é outro valor")
+    ia = IaDeRoteiro(na_pergunta("Quer receber novidades?", "Sim", acao="marcar"))
+
+    rodar(fabrica_sessao, navegador, dono, ia)
+
+    assert perguntas == ['Vou marcar "Sim" em "Quer receber novidades?". Está certo?']
+    assert "não confirmou" in ia.pedidos[-1]["resultado_do_ultimo_passo"]
+    assert [passo["action"] for passo in ler(fabrica_sessao, rascunho_id).steps] == ["navigate"]

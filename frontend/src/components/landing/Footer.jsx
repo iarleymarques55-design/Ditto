@@ -1,8 +1,17 @@
 import { ChevronRight, Mail } from 'lucide-react'
+import { Link } from 'react-router'
 import marca from '../../assets/ditto-marca.png'
 import { IconeGithub, IconeLinkedin, IconeYoutube } from './IconesSociais.jsx'
 import Logo from './Logo.jsx'
-import { EMAIL_CONTATO, GITHUB_URL, LINKEDIN_URL, YOUTUBE_URL, navLinks, propsDoLink } from './navLinks.js'
+import {
+  EMAIL_CONTATO,
+  GITHUB_URL,
+  LINKEDIN_URL,
+  POLITICA_PRIVACIDADE_URL,
+  YOUTUBE_URL,
+  navLinks,
+  propsDoLink,
+} from './navLinks.js'
 
 const linksRodape = [
   ...navLinks,
@@ -105,7 +114,13 @@ function Footer() {
 
         <div className="flex flex-col gap-1 border-t border-line py-3 text-[13px] leading-5 text-body md:flex-row md:items-center md:justify-between">
           <p>
-            © {ANO_ATUAL} <span className="font-medium text-ink">Ditto</span>. Todos os direitos reservados.
+            © {ANO_ATUAL} <span className="font-medium text-ink">Ditto</span>. Todos os direitos reservados.{' '}
+            <Link
+              to={POLITICA_PRIVACIDADE_URL}
+              className="-my-3 inline-flex min-h-11 items-center text-navy underline-offset-4 hover:text-ink hover:underline motion-safe:transition-colors"
+            >
+              Política de privacidade
+            </Link>
           </p>
           <p className="italic">
             Projeto de código aberto, feito por{' '}

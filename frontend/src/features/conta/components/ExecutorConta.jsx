@@ -16,7 +16,14 @@ const ESTADOS = {
     marcador: 'bg-sinal',
     texto: 'Ligado, esperando o worker. Confira se ele está no ar com EXTENSION_RUNNER_PORT=8765 no .env.',
   },
-  recusado: { marcador: 'bg-grafite', texto: 'Desligado: a ligação expirou. Ligue de novo.' },
+  recusado: {
+    marcador: 'bg-grafite',
+    texto: 'Desligado: a ligação expirou ou foi encerrada, por exemplo depois de trocar a senha. Ligue de novo.',
+  },
+  'em-uso': {
+    marcador: 'bg-sinal',
+    texto: 'Outro Chrome já está ligado nesta conta, e as tarefas rodam nele. Para usar este, desligue o outro.',
+  },
   'sem-token': { marcador: 'bg-grafite', texto: 'Desligado. As tarefas rodam no navegador do worker, sem as suas contas.' },
   'sem-resposta': { marcador: 'bg-grafite', texto: 'A extensão não respondeu. Recarregue a página.' },
   'sem-extensao': {

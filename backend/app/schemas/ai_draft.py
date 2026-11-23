@@ -50,7 +50,9 @@ class AiDraftCreate(BaseModel):
 class AiDraftAnswer(BaseModel):
     """A resposta da pessoa a uma dúvida da IA."""
 
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"answer": "Pode clicar"}]})
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"examples": [{"answer": "Pode clicar"}]}
+    )
 
     answer: str = Field(
         min_length=1,
@@ -79,7 +81,9 @@ class AiDraftResponse(BaseModel):
     start_url: str = Field(description="Onde a tarefa começa.")
     name: str | None = Field(description="Nome da tarefa, quando já existe.")
     step_count: int = Field(description="Quantos passos já foram anotados.")
-    events: list[AiDraftEvent] = Field(description="O que a IA já fez, do mais antigo ao mais novo.")
+    events: list[AiDraftEvent] = Field(
+        description="O que a IA já fez, do mais antigo ao mais novo."
+    )
     question: AiDraftQuestion | None = Field(description="A dúvida aberta, quando há uma.")
     error: str | None = Field(description="Por que a IA parou, quando falhou.")
     flow_id: uuid.UUID | None = Field(description="A tarefa criada, quando terminou.")

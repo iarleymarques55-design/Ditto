@@ -3,3 +3,5 @@ pytest==9.2.0
 ruff==0.17.3
 bandit==1.9.4
 pip-audit==2.10.1
+# Simula o bucket S3 nos testes, sem rede
+moto[s3]==5.2.5

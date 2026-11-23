@@ -84,7 +84,7 @@ def is_compatible(action: StepAction, element: PageElement) -> bool:
     if action == StepAction.SELECT:
         return element.role == "combobox"
     if action == StepAction.CHECK:
-        return element.role in {"checkbox", "radio"}
+        return element.role in {"checkbox", "radio", "switch"}
     if action == StepAction.PRESS:
         return element.role in _TEXT_INPUT_ROLES
     return element.role not in _TEXT_INPUT_ROLES

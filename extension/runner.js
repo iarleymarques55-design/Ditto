@@ -2,7 +2,7 @@
 // O worker manda comandos; cada linha abre uma aba ao lado da aba ativa, controlada por chrome.debugger.
 // Só as abas abertas pelo Ditto (e as janelas que elas abrirem) são controladas. As outras nunca.
 
-const RELE_URL = 'ws://127.0.0.1:8765/extension'
+// RELE_URL vem de config.js
 const CHAVE_TOKEN = 'dittoExecutorToken'
 const CHAVE_ABAS = 'dittoExecutorAbas'
 const PING_MS = 20000
@@ -10,9 +10,21 @@ const ESPERA_MAXIMA_MS = 30000
 const DOWNLOAD_LIMITE_MS = 110000
 const DOWNLOAD_RECENTE_MS = 10 * 60 * 1000
 const FECHAMENTO_TOKEN_RECUSADO = 4401
+const FECHAMENTO_CONTA_EM_USO = 4409
+
+// O token e o controle das abas viajam por aqui: fora deste computador, só com criptografia
+function releSeguro(endereco) {
+  try {
+    const url = new URL(endereco)
+    if (url.protocol === 'wss:') return true
+    return url.protocol === 'ws:' && ['127.0.0.1', 'localhost'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
 
 let socket = null
-let estadoExecutor = 'sem-token' // sem-token | conectando | conectado | desconectado | recusado
+let estadoExecutor = 'sem-token' // sem-token | conectando | conectado | desconectado | recusado | em-uso
 let espera = 1000
 let relogioPing = null
 let relogioReconexao = null
@@ -32,11 +44,27 @@ function enviarAoRele(mensagem) {
 
 // ─── Conexão com o worker ────────────────────────────────────────────────
 
-async function conectarExecutor() {
-  if (socket) return
+// Uma conexão de cada vez. Duas chamadas juntas (o painel ligando e o alarme acordando) passavam
+// as duas por "if (socket)" antes de qualquer uma abrir o socket: abriam dois, e o relé recusa o
+// segundo da mesma conta
+let conexaoEmAndamento = null
+
+function conectarExecutor() {
+  if (socket) return Promise.resolve()
+  conexaoEmAndamento ??= abrirConexao().finally(() => {
+    conexaoEmAndamento = null
+  })
+  return conexaoEmAndamento
+}
+
+async function abrirConexao() {
   const { [CHAVE_TOKEN]: token } = await chrome.storage.local.get(CHAVE_TOKEN)
   if (!token) {
     estadoExecutor = 'sem-token'
+    return
+  }
+  if (!releSeguro(RELE_URL)) {
+    estadoExecutor = 'recusado'
     return
   }
 
@@ -62,6 +90,11 @@ async function conectarExecutor() {
       estadoExecutor = 'recusado'
       return
     }
+    // Outro Chrome já está ligado nesta conta: tenta de novo só no alarme de cada minuto
+    if (evento.code === FECHAMENTO_CONTA_EM_USO) {
+      estadoExecutor = 'em-uso'
+      return
+    }
     estadoExecutor = 'desconectado'
     agendarReconexao()
   }
@@ -76,6 +109,8 @@ function agendarReconexao() {
 async function salvarTokenDoExecutor(token) {
   await chrome.storage.local.set({ [CHAVE_TOKEN]: token })
   espera = 1000
+  // Uma conexão que já estava abrindo, com o token antigo, termina antes e depois dá lugar à nova
+  await conexaoEmAndamento
   if (socket) {
     const antigo = socket
     socket = null
@@ -137,6 +172,8 @@ async function executar(metodo, params) {
       )
     case 'finishDownload':
       return esperarDownload(params.url)
+    case 'readDownload':
+      return lerDownload(params.downloadId)
     case 'removeDownload':
       await chrome.downloads.removeFile(params.downloadId).catch(() => {})
       await chrome.downloads.erase({ id: params.downloadId }).catch(() => {})
@@ -159,6 +196,60 @@ async function esperarDownload(url) {
     await new Promise((resolver) => setTimeout(resolver, 300))
   }
   throw new Error('O download não terminou a tempo.')
+}
+
+// ─── Envio do arquivo baixado ────────────────────────────────────────────
+// Quando o worker roda em outra máquina (nuvem, Docker), ele não alcança a pasta Downloads
+// daqui. A extensão não pode ler arquivos do disco, então busca o mesmo endereço de novo, com
+// as contas logadas deste Chrome, e manda o conteúdo pela conexão.
+
+const DOWNLOAD_MAXIMO_BYTES = 40 * 1024 * 1024
+
+function paraBase64(bytes) {
+  let binario = ''
+  for (let inicio = 0; inicio < bytes.length; inicio += 0x8000) {
+    binario += String.fromCharCode(...bytes.subarray(inicio, inicio + 0x8000))
+  }
+  return btoa(binario)
+}
+
+// Endereço blob: só existe dentro da página que o criou: a leitura roda na aba do Ditto
+async function lerBlobNaAba(endereco) {
+  const origem = new URL(endereco.slice('blob:'.length)).origin
+  for (const tabId of abasDoDitto) {
+    const aba = await chrome.tabs.get(tabId).catch(() => null)
+    if (!aba?.url || new URL(aba.url).origin !== origem) continue
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      args: [endereco],
+      func: async (url) => {
+        const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        let binario = ''
+        for (let inicio = 0; inicio < bytes.length; inicio += 0x8000) {
+          binario += String.fromCharCode(...bytes.subarray(inicio, inicio + 0x8000))
+        }
+        return btoa(binario)
+      },
+    })
+    if (result) return result
+  }
+  throw new Error('O arquivo foi gerado pela página e ela já o descartou.')
+}
+
+async function lerDownload(downloadId) {
+  const [item] = await chrome.downloads.search({ id: downloadId })
+  if (!item) throw new Error('O download não foi encontrado.')
+  if (item.fileSize > DOWNLOAD_MAXIMO_BYTES) throw new Error('O arquivo baixado passa de 40 MB.')
+  const endereco = item.finalUrl || item.url
+  if (endereco.startsWith('blob:')) return { base64: await lerBlobNaAba(endereco) }
+  if (!/^(https?|data):/.test(endereco)) throw new Error('Este tipo de download não pode ser enviado ao Ditto.')
+
+  const resposta = await fetch(endereco, { credentials: 'include' })
+  if (!resposta.ok) throw new Error(`O site respondeu ${resposta.status} ao baixar o arquivo de novo.`)
+  const bytes = new Uint8Array(await resposta.arrayBuffer())
+  if (bytes.length > DOWNLOAD_MAXIMO_BYTES) throw new Error('O arquivo baixado passa de 40 MB.')
+  return { base64: paraBase64(bytes) }
 }
 
 function soltarTodas() {

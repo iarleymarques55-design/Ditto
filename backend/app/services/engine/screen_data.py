@@ -69,11 +69,33 @@ _COLLECT_DATA = """
 }
 """
 
+# O texto que a pessoa vê, sem menus e rodapés: é por ele que a IA sabe se um passo deu certo.
+# innerText não traz o que está digitado nos campos.
+_VISIBLE_TEXT = """
+([maxChars]) => {
+  const root = document.querySelector('main,[role=main]') || document.body;
+  if (!root) return '';
+  let text = root.innerText || '';
+  for (const chrome of root.querySelectorAll('nav,header,footer,[role=navigation],[role=banner],[role=contentinfo]')) {
+    const piece = (chrome.innerText || '').trim();
+    if (piece) text = text.replace(piece, '');
+  }
+  return text.replace(/[ \\t]+/g, ' ').replace(/\\s*\\n\\s*/g, '\\n').trim().slice(0, maxChars);
+}
+"""
+
+# Listas comuns e as de formulários como o Google Forms, com as opções escondidas até abrir
 _SELECT_OPTIONS = """
-([marker, maxOptions]) => [...document.querySelectorAll('select[' + marker + ']')].map((el) => ({
-  index: Number(el.getAttribute(marker)),
-  options: [...el.options].map((option) => (option.text || '').replace(/\\s+/g, ' ').trim()).filter(Boolean).slice(0, maxOptions),
-}))
+([marker, maxOptions]) => {
+  const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+  return [...document.querySelectorAll('select[' + marker + '],[role=listbox][' + marker + ']')].map((el) => ({
+    index: Number(el.getAttribute(marker)),
+    options: (el.tagName === 'SELECT'
+      ? [...el.options].map((option) => option.text)
+      : [...el.querySelectorAll('[role=option]')].map((option) => option.textContent))
+      .map(clean).filter(Boolean).slice(0, maxOptions),
+  }));
+}
 """
 
 
@@ -104,6 +126,23 @@ def collect_screen_data(page: Page) -> list[ScreenData]:
         except PlaywrightError:
             continue
     return [ScreenData(index=index, **item) for index, item in enumerate(raw[:MAX_ITEMS])]
+
+
+def visible_text(page: Page, max_chars: int = 1500) -> str:
+    """Da página e dos iframes, até o limite. O sanitizador ainda passa por cima antes da IA."""
+    parts: list[str] = []
+    room = max_chars
+    for frame in page.frames:
+        if room <= 0:
+            break
+        try:
+            text = frame.evaluate(_VISIBLE_TEXT, [room])
+        except PlaywrightError:
+            continue
+        if text:
+            parts.append(text)
+            room -= len(text) + 1
+    return "\n".join(parts)[:max_chars]
 
 
 def select_options(frame: Page | Frame) -> dict[int, list[str]]:

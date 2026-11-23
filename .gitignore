@@ -1,0 +1,8 @@
+# Configurações locais do editor: podem guardar senhas, como a conexão do banco no SQLTools
+.vscode/*
+!.vscode/extensions.json
+
+# Senha do banco do docker-compose (o .env.example é versionado)
+.env
+.env.*
+!.env.example

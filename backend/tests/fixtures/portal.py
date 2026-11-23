@@ -177,6 +177,119 @@ def _consulta(cnpj: str, layout: str) -> str:
 # Imita o Excel Online: o app fica num iframe, a grade é um canvas, as teclas vão para um campo
 # escondido da grade, a Caixa de Nome solta o cursor depois do Enter e a Barra de fórmulas grava
 # na célula ativa. Os ids são os mesmos do Excel de verdade.
+# Como um site de chat: barra lateral cheia de conversas antigas e a caixa de mensagem é um editor
+_CHAT = (
+    "<aside><nav>"
+    + "".join(f'<a href="/conversa/{numero}">Conversa antiga {numero}</a>' for numero in range(220))
+    + "</nav></aside>"
+    + """<main>
+<div id="caixa" contenteditable="true" role="textbox" aria-label="Mensagem" style="min-height:40px"><p data-placeholder="Como posso ajudar?"></p></div>
+<button onclick="document.getElementById('resposta').textContent = 'Resposta: ' + document.getElementById('caixa').innerText">Enviar</button>
+<p id="resposta"></p>
+</main>"""
+)
+
+# Como o Google Forms monta a página: o nome da pergunta fica num título à parte (aria-labelledby),
+# múltipla escolha e caixas são <div> com role, e a lista suspensa não é um <select>
+_FORMULARIO_GOOGLE = """
+<style>
+  [role=radio], [role=checkbox] { display: inline-block; width: 18px; height: 18px; border: 2px solid #555; cursor: pointer; }
+  [role=radio] { border-radius: 50%; }
+  [aria-checked=true] { background: #673ab7; }
+  [role=listbox] { display: inline-block; min-width: 160px; border: 1px solid #555; padding: 6px; cursor: pointer; }
+  .opcoes { display: none; }
+  [aria-expanded=true] .opcoes { display: block; }
+  [role=option] { padding: 4px; }
+  .erro { color: #d93025; }
+</style>
+<form onsubmit="return false">
+<div role="list">
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-nome">Nome completo <span aria-label="Pergunta obrigatória">*</span></div>
+    <input type="text" aria-labelledby="p-nome" data-pergunta="nome" required>
+    <div class="erro" id="erro-nome"></div>
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-email">E-mail</div>
+    <input type="email" aria-labelledby="p-email" data-pergunta="email">
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-cliente">Você já é cliente?</div>
+    <div role="radiogroup" aria-labelledby="p-cliente" data-pergunta="cliente">
+      <label><div role="radio" aria-label="Sim" data-value="Sim" aria-checked="false" tabindex="0"></div> Sim</label>
+      <label><div role="radio" aria-label="Não" data-value="Não" aria-checked="false" tabindex="0"></div> Não</label>
+    </div>
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-novidades">Quer receber novidades?</div>
+    <div role="radiogroup" aria-labelledby="p-novidades" data-pergunta="novidades">
+      <label><div role="radio" aria-label="Sim" data-value="Sim" aria-checked="false" tabindex="0"></div> Sim</label>
+      <label><div role="radio" aria-label="Não" data-value="Não" aria-checked="false" tabindex="0"></div> Não</label>
+    </div>
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-interesses">Interesses</div>
+    <div role="list" aria-labelledby="p-interesses" data-pergunta="interesses">
+      <label><div role="checkbox" aria-label="Planilhas" data-value="Planilhas" aria-checked="false" tabindex="0"></div> Planilhas</label>
+      <label><div role="checkbox" aria-label="Relatórios" data-value="Relatórios" aria-checked="false" tabindex="0"></div> Relatórios</label>
+    </div>
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-estado">Estado</div>
+    <div role="listbox" aria-labelledby="p-estado" aria-expanded="false" tabindex="0" data-pergunta="estado">
+      <div class="atual">Escolher</div>
+      <div class="opcoes">
+        <div role="option" data-value="São Paulo" aria-selected="false">São Paulo</div>
+        <div role="option" data-value="Bahia" aria-selected="false">Bahia</div>
+      </div>
+    </div>
+  </div>
+  <div role="listitem">
+    <div role="heading" aria-level="3" id="p-data">Data da visita</div>
+    <input type="date" aria-labelledby="p-data" data-pergunta="data">
+  </div>
+</div>
+<div role="button" tabindex="0" id="enviar">Enviar</div>
+</form>
+<p id="confirmacao"></p>
+<script>
+  for (const opcao of document.querySelectorAll('[role=radio]')) {
+    opcao.addEventListener('click', () => {
+      for (const outra of opcao.closest('[role=radiogroup]').querySelectorAll('[role=radio]')) outra.setAttribute('aria-checked', 'false');
+      opcao.setAttribute('aria-checked', 'true');
+    });
+  }
+  for (const caixa of document.querySelectorAll('[role=checkbox]')) {
+    caixa.addEventListener('click', () => caixa.setAttribute('aria-checked', caixa.getAttribute('aria-checked') === 'true' ? 'false' : 'true'));
+  }
+  const lista = document.querySelector('[role=listbox]');
+  lista.addEventListener('click', (evento) => {
+    const opcao = evento.target.closest('[role=option]');
+    if (opcao) {
+      for (const outra of lista.querySelectorAll('[role=option]')) outra.setAttribute('aria-selected', 'false');
+      opcao.setAttribute('aria-selected', 'true');
+      lista.querySelector('.atual').textContent = opcao.dataset.value;
+      lista.setAttribute('aria-expanded', 'false');
+    } else {
+      lista.setAttribute('aria-expanded', lista.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+    }
+  });
+  document.getElementById('enviar').addEventListener('click', () => {
+    const nome = document.querySelector('[data-pergunta=nome]').value;
+    if (!nome) { document.getElementById('erro-nome').textContent = 'Esta pergunta é obrigatória'; return; }
+    const escolhido = (grupo) => [...document.querySelectorAll('[data-pergunta=' + grupo + '] [aria-checked=true],[data-pergunta=' + grupo + '] [aria-selected=true]')].map((el) => el.dataset.value).join(',');
+    const dados = {
+      nome, email: document.querySelector('[data-pergunta=email]').value,
+      cliente: escolhido('cliente'), novidades: escolhido('novidades'), interesses: escolhido('interesses'),
+      estado: escolhido('estado'), data: document.querySelector('[data-pergunta=data]').value,
+    };
+    fetch('/formulario-enviado?dados=' + encodeURIComponent(JSON.stringify(dados)));
+    document.querySelector('form').remove();
+    document.getElementById('confirmacao').textContent = 'Sua resposta foi registrada.';
+  });
+</script>
+"""
+
 _PLANILHA = """<iframe id="WacFrame_Excel_0" src="/planilha-app" style="width:760px;height:340px;border:0"></iframe>"""
 
 _PLANILHA_APP = """
@@ -309,6 +422,7 @@ class Portal:
         self.passwords_seen: list[str] = []
         self.login_ok = True
         self.planilha: dict[str, str] = {}
+        self.formularios: list[dict] = []
         # Um dado da tela final que some em algumas execuções
         self.tela_final_sem_protocolo = False
         portal = self
@@ -347,6 +461,8 @@ class Portal:
                 query = parse_qs(parts.query)
                 paginas = {
                     "/busca": lambda: _BUSCA,
+                    "/chat": lambda: _CHAT,
+                    "/formulario-google": lambda: _FORMULARIO_GOOGLE,
                     "/painel-falso": lambda: "<h1>Painel</h1>",
                     "/com-arquivo": lambda: '<input type="file">',
                     "/site-moderno": lambda: _SITE_MODERNO,
@@ -384,6 +500,9 @@ class Portal:
                 if parts.path == "/api/total-filtrado":
                     time.sleep(0.8)
                     self._html("2")
+                elif parts.path == "/formulario-enviado":
+                    portal.formularios.append(json.loads(query.get("dados", ["{}"])[0]))
+                    self._html("ok")
                 elif parts.path == "/planilha-gravou":
                     celula = query.get("celula", [""])[0]
                     portal.planilha[celula] = query.get("valor", [""])[0]
@@ -458,4 +577,5 @@ class Portal:
         self.passwords_seen.clear()
         self.login_ok = True
         self.planilha: dict[str, str] = {}
+        self.formularios = []
         self.tela_final_sem_protocolo = False

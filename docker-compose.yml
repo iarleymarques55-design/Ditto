@@ -1,0 +1,90 @@
+# O Ditto inteiro em containers: banco, API, worker e painel.
+#
+# Antes de subir:
+#   1. Copie .env.example para .env (aqui na raiz) e defina DITTO_DB_PASSWORD.
+#   2. Copie backend/.env.example para backend/.env e preencha JWT_SECRET e FERNET_KEYS.
+#   3. Pare o uvicorn, o Vite e o worker que rodam fora do Docker: as portas são as mesmas.
+#
+# Subir: docker compose up --build    Painel: http://localhost:5173
+#
+# As portas só abrem para este computador (127.0.0.1), nunca para a rede.
+
+x-backend: &backend
+  build: ./backend
+  env_file: backend/.env
+  environment: &backend-env
+    DATABASE_URL: postgresql+psycopg://ditto:${DITTO_DB_PASSWORD:?defina DITTO_DB_PASSWORD no .env da raiz}@db:5432/ditto
+    STORAGE_DIR: /app/storage
+    # Dentro do container não há tela: o navegador do worker sempre roda sem janela
+    BROWSER_HEADLESS: "true"
+    EXTENSION_RUNNER_PORT: "8765"
+  volumes:
+    # A API entrega os arquivos que o worker gerou: os dois precisam ver a mesma pasta
+    - arquivos:/app/storage
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ditto
+      POSTGRES_USER: ditto
+      POSTGRES_PASSWORD: ${DITTO_DB_PASSWORD:?defina DITTO_DB_PASSWORD no .env da raiz}
+    volumes:
+      - banco:/var/lib/postgresql/data
+    # 5433 para não brigar com um Postgres que já roda no computador
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ditto -d ditto"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *backend-env
+      # Dentro do container o relé precisa ouvir em todas as interfaces para a porta publicada
+      # funcionar. A porta continua presa a 127.0.0.1 do lado de fora (veja "ports")
+      EXTENSION_RELAY_HOST: 0.0.0.0
+      # Com a porta aberta, só a extensão do Ditto conecta (o id está em chrome://extensions)
+      EXTENSION_ORIGINS: ${DITTO_EXTENSION_ORIGINS:?defina DITTO_EXTENSION_ORIGINS no .env da raiz}
+    depends_on:
+      # A API aplica as migrações ao subir
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8765:8765"
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000/api/v1
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+    depends_on:
+      - api
+    # A extensão conversa com o painel em localhost:5173
+    ports:
+      - "127.0.0.1:5173:80"
+    restart: unless-stopped
+
+volumes:
+  banco:
+  arquivos:

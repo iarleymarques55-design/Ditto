@@ -11,7 +11,8 @@ const TEXTO_DO_EXECUTOR = {
   conectado: 'Executor ligado: as tarefas rodam neste Chrome.',
   conectando: 'Executor: procurando o worker do Ditto...',
   desconectado: 'Executor: o worker do Ditto não está no ar. As tarefas esperam na fila.',
-  recusado: 'Executor: a conexão expirou. Conecte de novo na página da conta do painel.',
+  recusado: 'Executor: a conexão expirou ou foi encerrada. Conecte de novo na página da conta do painel.',
+  'em-uso': 'Executor: outro Chrome já está ligado nesta conta. As tarefas rodam nele.',
   'sem-token': 'Executor desligado. Para rodar as tarefas neste Chrome, conecte na página da conta do painel.',
 }
 

@@ -1,8 +1,9 @@
 import uuid
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, Path, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
 from app.controllers.dependencies import (
     CONFLICT_RESPONSE,
@@ -40,8 +41,17 @@ def read_upload(file: UploadFile | None) -> tuple[str | None, bytes | None]:
     return file.filename, content
 
 
+def _disposition(file_name: str) -> str:
+    """Sempre como anexo. Nome com acento ou aspas vai codificado (RFC 6266), sem quebrar o
+    cabeçalho."""
+    quoted = quote(file_name)
+    if quoted == file_name:
+        return f'attachment; filename="{file_name}"'
+    return f"attachment; filename*=utf-8''{quoted}"
+
+
 def _attachment(file_name: str, content: bytes, media_type: str) -> Response:
-    headers = {"Content-Disposition": f'attachment; filename="{file_name}"'}
+    headers = {"Content-Disposition": _disposition(file_name)}
     return Response(content=content, media_type=media_type, headers=headers)
 
 
@@ -186,7 +196,7 @@ def get_item_output(
 
 @router.get(
     "/artifacts/{artifact_id}",
-    response_class=FileResponse,
+    response_class=StreamingResponse,
     summary="Baixar um arquivo gerado",
     description="Baixa um PDF, XML ou screenshot gerado por uma execução. Sempre como anexo.",
     responses={
@@ -198,6 +208,11 @@ def download_artifact(
     artifact_id: Annotated[uuid.UUID, Path(description="Identificador do arquivo.")],
     user: CurrentUser,
     session: DbSession,
-) -> FileResponse:
-    artifact, path = RunService(session).get_artifact(artifact_id, user.id)
-    return FileResponse(path, media_type=artifact.content_type, filename=artifact.file_name)
+) -> StreamingResponse:
+    # Em pedaços, venha o arquivo do disco ou do bucket
+    artifact, content = RunService(session).get_artifact(artifact_id, user.id)
+    return StreamingResponse(
+        content,
+        media_type=artifact.content_type,
+        headers={"Content-Disposition": _disposition(artifact.file_name)},
+    )

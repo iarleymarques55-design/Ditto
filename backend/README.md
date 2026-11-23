@@ -395,7 +395,7 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 ## O que ainda falta
 
 - **Sessão na repetição:** cada linha começa em um navegador limpo, sem a sua sessão. Quem grava já logado vê um aviso na repetição e precisa gravar de novo, começando pelo login. Código por e-mail ou SMS e login pelo Google não passam.
-- **Grandes volumes:** o limite é de 500 linhas por execução, e cada execução roda uma linha de cada vez em um único worker. Ainda não foi medido com muitas execuções ao mesmo tempo.
+- **Grandes volumes:** o limite é de 500 linhas por execução, e cada execução roda uma linha de cada vez. Execuções diferentes rodam em paralelo: uma linha de trabalho para cada conta com a extensão ligada (até `WORKER_MAX_ACCOUNTS`), ou `WORKER_CONCURRENCY` sem a extensão. Ainda não foi medido com muitas execuções ao mesmo tempo.
 - **Repetir para cada linha de uma tabela do site:** a repetição só vem da planilha enviada. A tabela é capturada, mas ainda não dá para clicar em cada linha dela.
 - **Condições:** não há "se aparecer X, faça Y".
 - **Envio de arquivo para o site:** a extensão avisa que não grava esse passo.
@@ -403,5 +403,5 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 - **Armazenamento:** os arquivos ficam em disco. Em produção, precisa de um volume ou de um bucket.
 - **Recuperação de senha e confirmação de e-mail:** ainda não existem.
 - **Iframes:** gravar, repetir e capturar funcionam dentro deles, mas as camadas 2 e 3 de reparo só olham a página principal.
-- **Deploy:** não há Dockerfile ainda, e o proxy não substitui bloquear a saída para a rede interna no próprio ambiente.
+- **Deploy:** o [Dockerfile](Dockerfile) monta a API e o worker; o proxy não substitui bloquear a saída para a rede interna no próprio ambiente. No Railway, API e worker ficam em serviços separados: preencha `S3_BUCKET` e as chaves para os dois verem os mesmos arquivos, e `TRUSTED_PROXY_HOPS=1` na API.
 - **Benchmark:** os pesos e o limiar da camada 2 são valores iniciais, sem calibração com sites reais.

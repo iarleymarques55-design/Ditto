@@ -14,7 +14,10 @@ from app.services.engine.snapshot import PageElement
 from app.services.sanitizer import SecretLeakError, build_explorer_payload
 
 Cabecalho = dict[str, str]
-PEDIDO = {"prompt": "Consulte o CNPJ 111 e guarde a situação.", "start_url": "https://portal.exemplo/busca"}
+PEDIDO = {
+    "prompt": "Consulte o CNPJ 111 e guarde a situação.",
+    "start_url": "https://portal.exemplo/busca",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +83,9 @@ def test_resposta_gigante_e_recusada(api: TestClient, autenticado: Cabecalho) ->
     assert resposta.status_code == 422
 
 
-@pytest.mark.parametrize("texto", ["' OR 1=1 --", "'; DROP TABLE ai_drafts; --", "<script>alert(1)</script>"])
+@pytest.mark.parametrize(
+    "texto", ["' OR 1=1 --", "'; DROP TABLE ai_drafts; --", "<script>alert(1)</script>"]
+)
 def test_injecao_no_pedido_fica_so_como_texto(
     texto: str, api: TestClient, autenticado: Cabecalho
 ) -> None:
@@ -149,7 +154,12 @@ def test_pacote_da_ia_some_com_segredos_conhecidos() -> None:
 
 def test_resposta_da_ia_comprida_e_cortada_em_vez_de_quebrar() -> None:
     decisao = ExplorerDecision.model_validate(
-        {"acao": "perguntar", "pergunta": "x" * 5000, "opcoes": ["a" * 500] * 20, "descricao": "y" * 900}
+        {
+            "acao": "perguntar",
+            "pergunta": "x" * 5000,
+            "opcoes": ["a" * 500] * 20,
+            "descricao": "y" * 900,
+        }
     )
     assert len(decisao.pergunta) == 400
     assert len(decisao.opcoes) == 6

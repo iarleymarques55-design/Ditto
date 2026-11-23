@@ -1,6 +1,6 @@
 // Guarda a gravação. O Chrome desliga este arquivo quando fica ocioso, por isso tudo vai para o storage.
 // O executor, que roda as tarefas neste Chrome, fica em runner.js.
-importScripts('runner.js')
+importScripts('config.js', 'runner.js')
 
 const CHAVE = 'gravacao'
 const MAX_PASSOS = 200

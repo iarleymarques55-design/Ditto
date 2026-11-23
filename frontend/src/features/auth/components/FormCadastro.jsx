@@ -70,7 +70,8 @@ function FormCadastro() {
         {POLITICA_PRIVACIDADE_URL && (
           <p className="text-center text-[13px] leading-normal text-body">
             Ao criar a conta, você concorda com a{' '}
-            <Link to={POLITICA_PRIVACIDADE_URL} className="font-medium text-ink underline-offset-2 hover:underline">
+            {/* Abre em outra aba: o formulário preenchido continua aqui */}
+            <Link to={POLITICA_PRIVACIDADE_URL} target="_blank" rel="noreferrer" className="font-medium text-ink underline-offset-2 hover:underline">
               Política de privacidade
             </Link>
             .

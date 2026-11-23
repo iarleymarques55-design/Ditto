@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.exceptions import DomainError
+from app.models.ai_draft import AiDraft
 from app.models.enums import AiDraftStatus, HelpStatus, ItemStatus, LogLevel, RunStatus, RunTrigger
 from app.models.run import Run
 from app.repositories.ai_draft_repository import AiDraftRepository
@@ -19,7 +20,7 @@ from app.repositories.repair_repository import RepairRepository
 from app.repositories.run_repository import RunRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.services import run_lifecycle, storage
-from app.services.ai_explorer import AiExplorer, claim_next_draft
+from app.services.ai_explorer import AiExplorer, BrowserUnavailableError, claim_next_draft
 from app.services.analyzer import analyze_flow
 from app.services.engine.llm_explorer import LlmExplorer
 from app.services.engine.llm_repair import LlmRepairer
@@ -79,16 +80,43 @@ def process_next_draft(
             return False
         try:
             AiExplorer(session, draft, browser, explorer).run()
+        except BrowserUnavailableError:
+            _retry_draft_later(session, draft)
+            raise
         except Exception:
             # Para o rascunho, nunca o worker
             logger.exception("Falha inesperada no rascunho %s", draft.id)
             session.rollback()
             AiDraftRepository(session).update_if_open(
                 draft.id,
-                {"status": AiDraftStatus.FAILED, "error": "Erro interno ao montar a tarefa.", "question": None},
+                {
+                    "status": AiDraftStatus.FAILED,
+                    "error": "Erro interno ao montar a tarefa.",
+                    "question": None,
+                },
             )
             session.commit()
     return True
+
+
+_RECONNECTING = "A ligação com o Chrome caiu. Reconectando para tentar de novo."
+
+
+def _retry_draft_later(session: Session, draft: AiDraft) -> None:
+    """Uma volta para a fila, enquanto o worker reconecta. Na segunda queda, o pedido falha."""
+    session.rollback()
+    events = list(draft.events or [])
+    if any(event.get("text") == _RECONNECTING for event in events):
+        values = {
+            "status": AiDraftStatus.FAILED,
+            "error": "O Chrome não respondeu. Confira se a extensão do Ditto está ligada.",
+            "question": None,
+        }
+    else:
+        entry = {"at": datetime.now(UTC).isoformat(), "kind": "info", "text": _RECONNECTING}
+        values = {"status": AiDraftStatus.QUEUED, "events": [*events, entry]}
+    AiDraftRepository(session).update_if_open(draft.id, values)
+    session.commit()
 
 
 def expire_help_requests(session: Session) -> int:

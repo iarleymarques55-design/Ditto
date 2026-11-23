@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -51,10 +52,10 @@ class AccountService:
             self.session.commit()
         return UserResponse.model_validate(user)
 
-    def avatar_path(self, user: User) -> str:
+    def avatar_content(self, user: User) -> Iterator[bytes]:
         if not user.avatar_id:
             raise NotFoundError("Esta conta não tem foto.")
-        return str(storage.path_for_read(_avatar_key(user)))
+        return storage.open_for_read(_avatar_key(user))
 
     def change_password(self, user: User, payload: PasswordChange) -> TokenResponse:
         if user.password_hash and not verify_password(

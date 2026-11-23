@@ -5,6 +5,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 class Settings(BaseSettings):
@@ -17,6 +18,9 @@ class Settings(BaseSettings):
     test_database_url: SecretStr | None = None
     environment: Literal["development", "production"] = "development"
     cors_origins: list[str] = ["http://localhost:5173"]
+    # Quantos proxies confiáveis ficam na frente da API. 0 no seu computador; 1 no Railway.
+    # Com 0, o cabeçalho X-Forwarded-For é ignorado: ninguém escolhe o próprio IP
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
 
     jwt_secret: SecretStr = Field(min_length=32)
     jwt_expires_minutes: int = 480
@@ -41,6 +45,14 @@ class Settings(BaseSettings):
     panel_url: str = "http://localhost:5173"
 
     storage_dir: Path = BACKEND_DIR / "storage"
+    # Com S3_BUCKET, os arquivos vão para um bucket compatível com S3 em vez de STORAGE_DIR.
+    # Necessário quando a API e o worker ficam em máquinas separadas (Railway)
+    s3_bucket: str | None = None
+    # Vazio usa a AWS; para Railway, Cloudflare R2 ou MinIO, o endereço que eles informam
+    s3_endpoint_url: str | None = None
+    s3_region: str = "auto"
+    s3_access_key_id: SecretStr | None = None
+    s3_secret_access_key: SecretStr | None = None
     artifact_retention_days: int = 30
 
     max_upload_bytes: int = 5 * 1024 * 1024
@@ -64,24 +76,53 @@ class Settings(BaseSettings):
     # Porta em que o worker espera a extensão para rodar as tarefas no Chrome da pessoa.
     # Vazio: o worker abre um navegador próprio
     extension_runner_port: int | None = None
+    # Onde a porta da extensão escuta. 127.0.0.1 no seu computador; 0.0.0.0 em container ou
+    # no Ditto publicado. O lado do Playwright sempre fica só em 127.0.0.1
+    extension_relay_host: str = "127.0.0.1"
+    # Extensões aceitas, como ["chrome-extension://<id>"]. Vazio aceita qualquer extensão do
+    # Chrome (o token ainda é exigido); fora do computador local, é obrigatório preencher
+    extension_origins: list[str] = []
     # Só para os testes com o portal local: em produção o worker nunca acessa a rede interna
     allow_private_networks: bool = False
 
     worker_poll_seconds: float = 2.0
+    # Sem a extensão: quantas execuções rodam ao mesmo tempo, cada uma com o seu Chromium
+    worker_concurrency: int = Field(default=1, ge=1, le=16)
+    # Com a extensão: quantas contas são atendidas ao mesmo tempo (uma linha de trabalho cada)
+    worker_max_accounts: int = Field(default=20, ge=1, le=200)
 
-    @field_validator("extension_runner_port", mode="before")
+    @field_validator(
+        "extension_runner_port",
+        "s3_bucket",
+        "s3_endpoint_url",
+        "s3_access_key_id",
+        "s3_secret_access_key",
+        mode="before",
+    )
     @classmethod
-    def _empty_port_is_off(cls, value: object) -> object:
-        # No .env, "EXTENSION_RUNNER_PORT=" vazio quer dizer desligado
+    def _empty_is_off(cls, value: object) -> object:
+        # No .env, "EXTENSION_RUNNER_PORT=" ou "S3_BUCKET=" vazio quer dizer desligado
         return None if value == "" else value
 
     @model_validator(mode="after")
     def _block_unsafe_production(self) -> Self:
         if self.environment == "production" and self.allow_private_networks:
             raise ValueError("ALLOW_PRIVATE_NETWORKS não pode ficar ligado em produção.")
-        if self.environment == "production" and self.extension_runner_port:
-            raise ValueError("EXTENSION_RUNNER_PORT é só para rodar no próprio computador.")
+        if self.s3_bucket and not (self.s3_access_key_id and self.s3_secret_access_key):
+            raise ValueError(
+                "Com S3_BUCKET, preencha também S3_ACCESS_KEY_ID e S3_SECRET_ACCESS_KEY."
+            )
+        if self.relay_is_public and not self.extension_origins:
+            raise ValueError(
+                "Com a porta da extensão aberta para a rede, preencha EXTENSION_ORIGINS com o "
+                "endereço da extensão do Ditto (chrome-extension://<id>)."
+            )
         return self
+
+    @property
+    def relay_is_public(self) -> bool:
+        """A porta da extensão aceita conexões de fora desta máquina."""
+        return bool(self.extension_runner_port) and self.extension_relay_host not in _LOOPBACK
 
     @property
     def llm_enabled(self) -> bool:

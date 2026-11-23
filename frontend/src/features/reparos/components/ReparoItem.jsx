@@ -3,7 +3,7 @@ import Badge from '../../../components/ui/Badge.jsx'
 import { formatarQuando } from '../../../lib/datas.js'
 import { ROTULO_CAMADA } from '../camadas.js'
 
-// Ficha de fichário com o caminho antigo e o novo, como as do caso real na landing.
+// Ficha de fichário com o caminho antigo e o novo, como as do exemplo na landing.
 function Ficha({ rotulo, className = '', children }) {
   return (
     <div className={`folha border-t-2 border-t-rec/45 p-3.5 ${className}`}>
