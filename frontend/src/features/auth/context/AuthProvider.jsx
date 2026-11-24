@@ -1,5 +1,6 @@
 import { createContext, useCallback, useEffect, useMemo, useState } from 'react'
 import { EVENTO_SESSAO_ENCERRADA, apagarToken, lerToken, salvarToken } from '../../../lib/http.js'
+import { desligarExecutor } from '../../fluxos/extensao.js'
 import { buscarContaLogada } from '../api.js'
 
 export const AuthContext = createContext(null)
@@ -40,6 +41,10 @@ export function AuthProvider({ children }) {
   }, [])
 
   const sair = useCallback(() => {
+    // Sair do painel também desliga este Chrome: num computador dividido, as tarefas da conta
+    // não podem continuar rodando com as sessões de quem usar a máquina depois.
+    // O pedido ao servidor sai antes de o token ser apagado e termina sozinho.
+    if (lerToken()) desligarExecutor()
     apagarToken()
     setUsuario(null)
   }, [])

@@ -20,7 +20,7 @@ Grava uma tarefa feita no navegador e envia para o Ditto, que passa a repeti-la.
 ## O que ela faz e o que não faz
 
 - Só grava as abas iniciadas pelo painel e as janelas abertas por elas. Fora disso, nenhum script é injetado.
-- O valor de campos de senha, cartão e código nunca é lido, nem enviado.
+- O valor de campos de senha, cartão e código nunca é lido, nem enviado. Além do tipo "senha", a extensão reconhece pelo nome do campo e pelo texto da tela: PIN, código de verificação ou de segurança, código do SMS (2FA, OTP), CVV, token, assinatura eletrônica. Na repetição, esses campos usam os acessos guardados no painel.
 - Ignora eventos falsos criados por scripts da página.
 - Recebe um token que dura 2 horas e só serve para enviar gravações. Ele não dá acesso à sua conta.
 - Precisa de acesso a todos os sites (`<all_urls>`) porque a tarefa pode acontecer em qualquer portal.
@@ -39,14 +39,18 @@ Com o executor ligado, o worker roda as tarefas da sua conta aqui, em uma aba ao
 
 1. No `.env` do backend, coloque `EXTENSION_RUNNER_PORT=8765` e reinicie o worker.
 2. No painel, abra a página da conta e clique em **Ligar neste Chrome**.
-3. O ícone da extensão mostra se o executor está ligado.
+3. A extensão abre uma janela com o e-mail da conta. Confira e clique em **Ligar**. Sem esse clique, nada é ligado: uma página que se passasse pelo painel não consegue ligar o seu Chrome à conta de outra pessoa.
+4. O ícone da extensão mostra se o executor está ligado e a qual conta.
+
+Para desligar, use **Desligar este Chrome** na página da conta ou na janela da extensão. Sair do painel também desliga. Desligar pelo painel encerra no servidor todos os tokens do executor da conta.
 
 Como funciona ([runner.js](runner.js)):
 
-- A extensão conecta no endereço de [config.js](config.js) (`ws://127.0.0.1:8765` no seu computador) com um token próprio, que dura 30 dias e não vale em nenhuma rota da API. Fora do computador local, só aceita `wss://`.
+- A extensão conecta no endereço de [config.js](config.js) (`ws://127.0.0.1:8765` no seu computador) com um token próprio, que dura 30 dias e não vale em nenhuma rota da API. Fora do computador local, só aceita `wss://`. Se o servidor recusar o token (vencido, revogado, senha trocada), a extensão apaga o token e para de tentar até você ligar de novo.
 - Cada linha abre uma aba ao lado da aba ativa, controlada com `chrome.debugger`. Só as abas abertas pelo Ditto, e as janelas que elas abrem, são controladas. Comandos para qualquer outra aba são recusados pela própria extensão.
-- Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". Clicar em **Cancelar** nela para a linha.
-- Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto pega o arquivo. Com o worker na mesma máquina, ele copia da pasta; com o worker na nuvem ou no Docker, a extensão baixa o mesmo endereço de novo, com as suas contas, e manda o conteúdo pela conexão (até 40 MB). Download gerado por envio de formulário (POST) não pode ser buscado de novo.
+- Mesmo nas abas do Ditto, a extensão recusa os comandos que o Ditto não usa e que dariam acesso além da página da tarefa: ler ou trocar cookies, mexer no armazenamento do navegador, listar ou abrir outras abas e comandos do navegador inteiro. As abas do Ditto só abrem endereços `http://` e `https://`. Se uma delas for parar num arquivo do computador ou numa página interna do Chrome, é fechada na hora.
+- Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". Clicar em **Cancelar** nela para a linha. A aba da linha abre na frente de propósito: numa aba em segundo plano o Chrome para de desenhar a página e os cliques da tarefa travam.
+- Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto pega o arquivo. Só saem deste Chrome os downloads feitos pelas abas do Ditto. Os que você faz nas suas abas nunca são lidos nem apagados. Com o worker na mesma máquina, ele copia da pasta; com o worker na nuvem ou no Docker, a extensão baixa o mesmo endereço de novo, com as suas contas, e manda o conteúdo pela conexão (até 40 MB). Download gerado por envio de formulário (POST) não pode ser buscado de novo.
 - Precisa das permissões `debugger` (controlar as abas do Ditto) e `alarms` (tentar de novo quando o worker estava desligado).
 
 ## Publicar com o Ditto na nuvem
@@ -54,5 +58,6 @@ Como funciona ([runner.js](runner.js)):
 O worker publicado atende várias pessoas ao mesmo tempo, cada uma no próprio Chrome.
 
 1. Em [config.js](config.js), troque `RELE_URL` pelo endereço do worker publicado, com `wss://` (ex.: `wss://ditto-worker.up.railway.app/extension`).
-2. Em `content_scripts.matches`, no [manifest.json](manifest.json), troque `http://localhost:5173/*` pelo endereço do painel (`https://...`).
-3. No worker, preencha `EXTENSION_RELAY_HOST=0.0.0.0` e `EXTENSION_ORIGINS=["chrome-extension://<id>"]` com o id da extensão (aparece em `chrome://extensions`). Sem a lista, o worker não inicia com a porta aberta para a rede.
+2. Em `content_scripts.matches`, no [manifest.json](manifest.json), troque `http://localhost:5173/*` pelo endereço do painel (`https://...`). O Chrome só aceita endereços fixos nesse arquivo, por isso a troca é feita nele. Só as páginas dessa lista falam com a extensão. Na versão de desenvolvimento ela é `localhost:5173`, a porta padrão do Vite: com a extensão de desenvolvimento instalada, evite rodar outro projeto nessa porta.
+3. Em [config.js](config.js), ponha o endereço da API publicada em `API_URLS`. A gravação só é enviada para um endereço dessa lista ou da mesma origem do painel.
+4. No worker, preencha `EXTENSION_RELAY_HOST=0.0.0.0` e `EXTENSION_ORIGINS=["chrome-extension://<id>"]` com o id da extensão (aparece em `chrome://extensions`). Sem a lista, o worker não inicia com a porta aberta para a rede.

@@ -3,6 +3,7 @@
 import json
 import logging
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,6 @@ from urllib.parse import urlsplit
 
 from playwright.sync_api import Browser, Page
 from playwright.sync_api import Error as PlaywrightError
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -33,8 +33,9 @@ from app.models.user import User
 from app.repositories.credential_repository import CredentialRepository
 from app.repositories.run_repository import RunRepository
 from app.services import run_lifecycle, storage
+from app.services.ai_explorer import BrowserUnavailableError
 from app.services.email_service import send_email
-from app.services.engine.browser import ItemTabs, host_matches
+from app.services.engine.browser import MAX_DOWNLOAD_BYTES, ItemTabs, host_matches
 from app.services.engine.executor import StepOutcome, StepPlan, StepRunner
 from app.services.engine.llm_repair import LlmRepairer
 from app.services.repair_service import save_new_version
@@ -44,7 +45,14 @@ from app.services.templating import render, rule_values, safe_relative_path
 logger = logging.getLogger(__name__)
 
 _SOURCE_BY_LAYER = {2: VersionSource.SIMILARITY, 3: VersionSource.LLM}
-_MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+_SCREENS_FOLDER = ".telas"
+
+_BROWSER_LOST = "a ligação com o navegador caiu: execução de volta à fila"
+_SHUTTING_DOWN = "o worker está desligando: execução de volta à fila"
+# Quedas do navegador dentro deste prazo: a partir daqui a execução para de voltar à fila e
+# termina, para não ficar indo e voltando para sempre
+_MAX_BROWSER_LOSSES = 3
+_BROWSER_LOSS_WINDOW = timedelta(minutes=30)
 
 
 class _Paused(Exception):
@@ -52,17 +60,32 @@ class _Paused(Exception):
 
 
 class _Canceled(Exception):
-    """A pessoa cancelou a execução enquanto ela rodava."""
+    """A execução deixou de ser deste worker: a pessoa cancelou, ou ela voltou para a fila."""
+
+
+class _Released(Exception):
+    """A execução voltou para a fila para outro worker continuar (o worker está desligando)."""
+
+
+class BrowserLostError(BrowserUnavailableError):
+    """A ligação com o navegador caiu no meio da execução. Ela já voltou para a fila (ou
+    terminou, depois de várias quedas); quem chama abre o navegador de novo."""
 
 
 class RunProcessor:
     def __init__(
-        self, session: Session, run: Run, browser: Browser, repairer: LlmRepairer | None = None
+        self,
+        session: Session,
+        run: Run,
+        browser: Browser,
+        repairer: LlmRepairer | None = None,
+        stop: threading.Event | None = None,
     ) -> None:
         self.session = session
         self.run = run
         self.browser = browser
         self.repairer = repairer
+        self.stop = stop
         self.flow: Flow = session.get(Flow, run.flow_id)
         self.owner: User = session.get(User, run.owner_id)
         self.steps: list[Step] = list(self.flow.steps)
@@ -73,29 +96,38 @@ class RunProcessor:
                 run.owner_id, self.flow.allowed_domains
             )
         }
+        # Usuários e senhas dos portais: nunca chegam à IA nem a uma captura
+        self.credential_secrets = [
+            secret for credential in self.credentials.values() for secret in credential.values()
+        ]
 
     def process(self) -> None:
-        failures_in_a_row = 0
         try:
-            for item in self.run.items:
-                if item.status not in {ItemStatus.PENDING, ItemStatus.RUNNING}:
-                    continue
-
-                self._process_item(item)
-                failures_in_a_row = failures_in_a_row + 1 if item.status == ItemStatus.FAILED else 0
-                if failures_in_a_row >= settings.circuit_breaker_failures:
-                    self._trip_circuit_breaker()
-                    break
-        except _Paused:
-            self.session.commit()
-            return
-        except _Canceled:
+            self._process_items()
+            # Ninguém cancelou enquanto a última linha rodava? A trava vale até o commit
+            self._lock_running()
+        except (_Paused, _Canceled, _Released):
             self.session.commit()
             return
 
         run_lifecycle.finalize(self.session, self.run)
         self.session.commit()
         self._notify_if_problem()
+
+    def _process_items(self) -> None:
+        failures_in_a_row = 0
+        for item in self.run.items:
+            if item.status not in {ItemStatus.PENDING, ItemStatus.RUNNING}:
+                continue
+            if self.stop is not None and self.stop.is_set():
+                self._release(_SHUTTING_DOWN)
+                raise _Released
+
+            self._process_item(item)
+            failures_in_a_row = failures_in_a_row + 1 if item.status == ItemStatus.FAILED else 0
+            if failures_in_a_row >= settings.circuit_breaker_failures:
+                self._trip_circuit_breaker()
+                return
 
     def _trip_circuit_breaker(self) -> None:
         # Várias tentativas erradas seguidas podem bloquear a conta da pessoa no portal
@@ -109,14 +141,61 @@ class RunProcessor:
             f"{settings.circuit_breaker_failures} falhas seguidas: execução parada para não bloquear a conta no portal",
         )
 
-    def _ensure_not_canceled(self) -> None:
+    def _ensure_still_running(self) -> None:
+        """Antes de cada passo: avisa que está vivo e confere se a execução continua sendo
+        deste worker. Cancelada, ou devolvida à fila, ela para aqui."""
+        RunRepository(self.session).touch_heartbeat(self.run.id, datetime.now(UTC))
         self.session.commit()
         self.session.refresh(self.run, ["status"])
-        if self.run.status == RunStatus.CANCELED:
+        status = self.run.status
+        # Devolve a conexão ao banco: o passo seguinte pode demorar
+        self.session.commit()
+        if status != RunStatus.RUNNING:
             raise _Canceled
 
+    def _lock_running(self) -> None:
+        """Trava a execução antes de gravar um resultado. Se ela foi cancelada nesse meio
+        tempo, nada do que esta linha mudou é gravado por cima do cancelamento."""
+        if RunRepository(self.session).lock_status(self.run.id) != RunStatus.RUNNING:
+            self.session.rollback()
+            raise _Canceled
+
+    def _release(self, message: str) -> None:
+        """Devolve a execução à fila sem refazer o que já terminou."""
+        self._lock_running()
+        for item in RunRepository(self.session).items_of(self.run.id):
+            requeue_item_after_crash(item)
+        self.run.status = RunStatus.QUEUED
+        run_lifecycle.add_log(self.session, self.run, LogLevel.INFO, message)
+        self.session.commit()
+
+    def _handle_browser_loss(self, error: Exception) -> None:
+        logger.warning(
+            "A ligação com o navegador caiu na execução %s: %s", self.run.id, type(error).__name__
+        )
+        since = datetime.now(UTC) - _BROWSER_LOSS_WINDOW
+        losses = RunRepository(self.session).count_log_since(self.run.id, _BROWSER_LOST, since)
+        if losses + 1 >= _MAX_BROWSER_LOSSES:
+            # Já voltou para a fila várias vezes: termina aqui
+            self._lock_running()
+            for item in RunRepository(self.session).items_of(self.run.id):
+                requeue_item_after_crash(item)
+            run_lifecycle.skip_open_items(self.session, self.run)
+            run_lifecycle.add_log(
+                self.session,
+                self.run,
+                LogLevel.FAILURE,
+                "a ligação com o navegador caiu várias vezes seguidas: execução interrompida",
+            )
+            run_lifecycle.finalize(self.session, self.run)
+            self.session.commit()
+            self._notify_if_problem()
+        else:
+            self._release(_BROWSER_LOST)
+        raise BrowserLostError from error
+
     def _process_item(self, item: RunItem) -> None:
-        self._ensure_not_canceled()
+        self._ensure_still_running()
 
         # Repetir uma linha que já tocou em um passo sem volta poderia pagar ou enviar duas vezes
         if item.irreversible_done:
@@ -132,7 +211,11 @@ class RunProcessor:
 
         started = time.monotonic()
         values = {**rule_values(self.flow.variables, self.run.timezone), **item.input}
-        tabs = ItemTabs(self.browser, self.flow.allowed_domains)
+        try:
+            tabs = ItemTabs(self.browser, self.flow.allowed_domains)
+        except PlaywrightError as error:
+            # Sem aba não há o que tentar: a ligação com o navegador (ou com a extensão) caiu
+            self._handle_browser_loss(error)
         try:
             runner = self._new_runner(tabs.current, item)
             for step in self.steps:
@@ -145,6 +228,8 @@ class RunProcessor:
             run_lifecycle.fail_item(item, error.detail)
             self._log_failure(item, error.detail)
         except PlaywrightError as error:
+            if not self.browser.is_connected():
+                self._handle_browser_loss(error)
             # A mensagem do navegador pode conter valores digitados: só o tipo vai para o log
             logger.warning(
                 "Falha do navegador na linha %s: %s", item.position, type(error).__name__
@@ -153,7 +238,7 @@ class RunProcessor:
             run_lifecycle.fail_item(item, message)
             self._log_failure(item, message)
         finally:
-            tabs.close()
+            _close_tabs(tabs)
 
     def _new_runner(self, page: Page, item: RunItem) -> StepRunner:
         def mark_irreversible() -> None:
@@ -180,11 +265,13 @@ class RunProcessor:
         self, page: Page, runner: StepRunner, item: RunItem, step: Step, values: dict[str, str]
     ) -> bool:
         """Devolve False quando a linha termina aqui, com falha."""
-        self._ensure_not_canceled()
+        self._ensure_still_running()
         self._pause_if_needs_confirmation(item, step)
 
         started = time.monotonic()
         plan = self._build_plan(page, item, step, values)
+        # O passo pode levar minutos: a conexão com o banco não fica presa esperando o navegador
+        self.session.commit()
         outcome = runner.run(plan)
         duration = int((time.monotonic() - started) * 1000)
 
@@ -192,8 +279,12 @@ class RunProcessor:
             self._record_success(item, step, outcome, duration, values)
             return True
 
-        self._screenshot(page, item)
-        if outcome.diagnostics:
+        if not self.browser.is_connected():
+            # O passo não falhou por causa do site: o navegador sumiu no meio dele
+            self._handle_browser_loss(RuntimeError("navegador desconectado"))
+
+        # Os detalhes só ficam guardados junto com a tela, para a limpeza apagar os dois juntos
+        if self._screenshot(page, item) and outcome.diagnostics:
             self._save_diagnostics(item, outcome.diagnostics)
         item.problem_step_position = step.position
 
@@ -226,12 +317,18 @@ class RunProcessor:
         raise _Paused
 
     def _credential_for(self, page: Page) -> dict[str, str]:
+        """O acesso salvo para o site em que a página está agora, nunca o de outro site: a
+        senha do banco não pode ser digitada na página de login de um terceiro."""
         host = (urlsplit(page.url).hostname or "").lower()
-        for domain, credential in self.credentials.items():
-            if host_matches(host, [domain]):
-                return credential
-        # Uma única credencial na tarefa serve mesmo se o login estiver em outro subdomínio
-        return next(iter(self.credentials.values()), {})
+        matches = [
+            (domain, credential)
+            for domain, credential in self.credentials.items()
+            if host_matches(host, [domain])
+        ]
+        if not matches:
+            return {}
+        # Com "empresa.com" e "login.empresa.com" salvos, vale o mais específico
+        return max(matches, key=lambda match: len(match[0]))[1]
 
     def _build_plan(
         self, page: Page, item: RunItem, step: Step, values: dict[str, str]
@@ -239,7 +336,11 @@ class RunProcessor:
         if step.credential_field:
             value = self._credential_for(page).get(step.credential_field)
             if not value:
-                raise BusinessRuleError("Falta salvar o acesso a este portal.")
+                host = urlsplit(page.url).hostname or "este portal"
+                raise BusinessRuleError(
+                    f"Falta salvar o acesso a {host}. O Ditto só digita uma senha no site "
+                    "para o qual ela foi salva."
+                )
         else:
             value = render(step.value_template, values) if step.value_template is not None else None
 
@@ -247,10 +348,7 @@ class RunProcessor:
             step.versions, key=lambda version: (version.is_current, version.version), reverse=True
         )
         # Nada disso pode chegar à IA: senhas dos portais e os dados da linha
-        secrets = [
-            secret for credential in self.credentials.values() for secret in credential.values()
-        ]
-        secrets.extend(values.values())
+        secrets = [*self.credential_secrets, *values.values()]
 
         return StepPlan(
             position=step.position,
@@ -303,9 +401,7 @@ class RunProcessor:
         values: dict[str, str],
     ) -> None:
         # Se o portal exibir uma senha salva na tela, ela não vai parar na planilha
-        secrets = [
-            secret for credential in self.credentials.values() for secret in credential.values()
-        ]
+        secrets = self.credential_secrets
         if isinstance(captured, str):
             clean: str | list[dict[str, str]] = scrub(captured, secrets)
             values[step.capture_key] = clean
@@ -358,7 +454,7 @@ class RunProcessor:
         with tempfile.TemporaryDirectory(prefix="ditto-download-") as folder:
             downloaded = Path(folder) / "arquivo"
             outcome.download.save_as(downloaded)
-            if downloaded.stat().st_size > _MAX_DOWNLOAD_BYTES:
+            if downloaded.stat().st_size > MAX_DOWNLOAD_BYTES:
                 raise BusinessRuleError("O arquivo baixado passa do tamanho permitido.")
             size = storage.save_file(key, downloaded)
 
@@ -374,19 +470,23 @@ class RunProcessor:
         )
 
     def _save_diagnostics(self, item: RunItem, diagnostics: dict[str, Any]) -> None:
-        """Fica ao lado da tela da falha, só para investigar. Não aparece no painel."""
-        key = f"{self.run.owner_id}/{self.run.id}/.telas/linha-{item.position}-foco.json"
+        """Fica ao lado da tela da falha, só para investigar. Não aparece no painel, e é apagado
+        junto com a tela (veja diagnostics_key_for)."""
+        key = diagnostics_key_for(self._screenshot_key(item))
         storage.save_bytes(key, json.dumps(diagnostics, ensure_ascii=False, indent=1).encode())
 
-    def _screenshot(self, page: Page, item: RunItem) -> None:
-        """Só para investigar problemas. Campos de senha saem cobertos."""
+    def _screenshot_key(self, item: RunItem) -> str:
+        return f"{self.run.owner_id}/{self.run.id}/{_SCREENS_FOLDER}/linha-{item.position}.png"
+
+    def _screenshot(self, page: Page, item: RunItem) -> bool:
+        """Só para investigar problemas. Campos de senha saem cobertos. Devolve se guardou."""
         try:
             content = page.screenshot(mask=[page.locator("input[type=password]")], timeout=5000)
         except PlaywrightError:
-            return
+            return False
         for old_key in RunRepository(self.session).replace_screenshot(item.id):
             storage.delete(old_key)
-        key = f"{self.run.owner_id}/{self.run.id}/.telas/linha-{item.position}.png"
+        key = self._screenshot_key(item)
         size = storage.save_bytes(key, content)
         self.session.add(
             Artifact(
@@ -399,6 +499,7 @@ class RunProcessor:
                 size_bytes=size,
             )
         )
+        return True
 
     def _open_help(self, item: RunItem, step: Step, outcome: StepOutcome) -> None:
         title = {
@@ -408,6 +509,8 @@ class RunProcessor:
             HelpKind.UNCERTAIN: "Não encontrei como seguir",
         }[outcome.help_kind]
 
+        # Cancelada enquanto o passo rodava: não abre pedido nem manda e-mail
+        self._lock_running()
         item.status = ItemStatus.WAITING_HUMAN
         self.run.status = RunStatus.WAITING_HUMAN
         self.session.add(
@@ -434,6 +537,7 @@ class RunProcessor:
         )
 
     def _finish_item(self, item: RunItem, started: float) -> None:
+        self._lock_running()
         item.duration_ms = int((time.monotonic() - started) * 1000)
         item.finished_at = datetime.now(UTC)
         item.status = ItemStatus.REPAIRED if item.resolved_layer else ItemStatus.SUCCEEDED
@@ -445,6 +549,9 @@ class RunProcessor:
         self.session.commit()
 
     def _log_failure(self, item: RunItem, message: str) -> None:
+        # A falha só vale se a execução ainda está rodando: senão a linha fica como o
+        # cancelamento deixou
+        self._lock_running()
         tag = f"{item.position:02d}/{self.total}"
         run_lifecycle.add_log(self.session, self.run, LogLevel.FAILURE, f"[{tag}] {message}")
         self.session.commit()
@@ -474,5 +581,17 @@ def requeue_item_after_crash(item: RunItem) -> None:
         item.status = ItemStatus.PENDING
 
 
-def items_of(session: Session, run: Run) -> list[RunItem]:
-    return list(session.scalars(select(RunItem).where(RunItem.run_id == run.id)))
+def diagnostics_key_for(screenshot_key: str) -> str | None:
+    """Onde ficam os detalhes da falha que acompanham uma tela. None se não for uma tela."""
+    folder, _, name = screenshot_key.rpartition("/")
+    if not folder.endswith(f"/{_SCREENS_FOLDER}") or not name.endswith(".png"):
+        return None
+    return f"{folder}/{name.removesuffix('.png')}-foco.json"
+
+
+def _close_tabs(tabs: ItemTabs) -> None:
+    try:
+        tabs.close()
+    except PlaywrightError:
+        # Com o navegador fora do ar, não há aba para fechar
+        logger.info("As abas da linha já estavam fechadas.")

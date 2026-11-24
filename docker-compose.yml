@@ -22,6 +22,9 @@ x-backend: &backend
     # A API entrega os arquivos que o worker gerou: os dois precisam ver a mesma pasta
     - arquivos:/app/storage
   restart: unless-stopped
+  # O worker espera as linhas de trabalho terminarem o passo atual antes de sair. Com os 10 s
+  # padrão do Docker, ele era morto no meio e as execuções ficavam presas por 5 minutos
+  stop_grace_period: 30s
 
 services:
   db:
@@ -71,6 +74,15 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8765:8765"
+    # O laço principal do worker toca este arquivo a cada volta. Parado há mais de 60 s quer
+    # dizer travado: "docker compose ps" mostra o worker como "unhealthy" (o Compose só marca,
+    # quem reinicia é você ou a plataforma de hospedagem)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, tempfile, time; f = os.path.join(tempfile.gettempdir(), 'ditto-worker-alive'); sys.exit(0 if time.time() - os.path.getmtime(f) < 60 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
   web:
     build:

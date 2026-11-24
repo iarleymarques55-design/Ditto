@@ -2,7 +2,7 @@ import csv
 import io
 import unicodedata
 from xml.etree.ElementTree import ParseError
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -11,6 +11,10 @@ from app.core.config import settings
 from app.core.exceptions import BusinessRuleError, PayloadTooLargeError
 
 _EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+# Um .xlsx é um zip. Um arquivo de 5 MB pode se abrir em gigabytes (bomba de descompressão) e
+# derrubar a API: o tamanho aberto é conferido antes de o openpyxl ler qualquer coisa
+_MAX_EXCEL_UNPACKED_BYTES = 60 * 1024 * 1024
+_MAX_EXCEL_ENTRIES = 2000
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -32,10 +36,24 @@ def _read_csv(content: bytes) -> list[list[str]]:
     return [row for row in csv.reader(io.StringIO(text), delimiter=delimiter)]
 
 
+def _check_unpacked_size(content: bytes) -> None:
+    with ZipFile(io.BytesIO(content)) as archive:
+        entries = archive.infolist()
+        if len(entries) > _MAX_EXCEL_ENTRIES:
+            raise BusinessRuleError("Esta planilha tem partes demais para ser lida.")
+        # O zipfile nunca abre mais que o tamanho declarado de cada parte: a soma é um teto real
+        unpacked = sum(entry.file_size for entry in entries)
+        if unpacked > _MAX_EXCEL_UNPACKED_BYTES:
+            raise PayloadTooLargeError(
+                "A planilha fica grande demais quando aberta. Divida em partes menores."
+            )
+
+
 def _read_excel(content: bytes) -> list[list[str]]:
     # As linhas só são lidas durante o laço (read_only): um XML malicioso ou quebrado dentro da
     # planilha aparece ali, e não ao abrir. Os dois ficam dentro da mesma proteção
     try:
+        _check_unpacked_size(content)
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         try:
             return _rows_until_limit(workbook)

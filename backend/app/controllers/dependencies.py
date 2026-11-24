@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.exceptions import UnauthorizedError
-from app.core.security import RECORDING_SCOPE
+from app.core.security import RECORDING_SCOPE, decode_access_token
 from app.models.user import User
 from app.schemas.error import ErrorResponse
 from app.services.auth_service import AuthService
@@ -50,7 +50,18 @@ def get_recording_user(
     )
 
 
+def get_token_issued_at(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_bearer)],
+) -> int:
+    """Quando o token desta sessão foi emitido (ms). Serve para pedir um login recente."""
+    if credentials is None:
+        raise UnauthorizedError
+    _, issued_at_ms, _ = decode_access_token(credentials.credentials)
+    return issued_at_ms
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+TokenIssuedAt = Annotated[int, Depends(get_token_issued_at)]
 RecordingUser = Annotated[User, Depends(get_recording_user)]
 DbSession = Annotated[Session, Depends(get_db)]
 Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Tamanho da página (máximo 100).")]

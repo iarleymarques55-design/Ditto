@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.enums import FlowStatus
-from app.models.flow import Flow, Step, Variable
+from app.models.flow import Flow, Step, StepVersion, Variable
 
 
 class FlowRepository:
@@ -55,4 +55,27 @@ class FlowRepository:
             .order_by(Flow.created_at)
             .limit(1)
             .with_for_update(skip_locked=True)
+        )
+
+    def lock_for_analysis(self, flow_id: uuid.UUID) -> Flow | None:
+        """A mesma gravação de novo, travada, para a segunda tentativa da análise."""
+        return self.session.scalar(
+            select(Flow)
+            .where(Flow.id == flow_id, Flow.status == FlowStatus.ANALYZING)
+            .with_for_update(skip_locked=True)
+        )
+
+    def current_version(self, step_id: uuid.UUID) -> StepVersion | None:
+        return self.session.scalar(
+            select(StepVersion).where(
+                StepVersion.step_id == step_id, StepVersion.is_current.is_(True)
+            )
+        )
+
+    def highest_version_number(self, step_id: uuid.UUID) -> int:
+        return (
+            self.session.scalar(
+                select(func.max(StepVersion.version)).where(StepVersion.step_id == step_id)
+            )
+            or 0
         )

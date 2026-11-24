@@ -94,7 +94,8 @@ export async function baixarArquivo(caminho, nome) {
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  // Alguns navegadores só começam a ler o arquivo depois do clique: revogar na hora cancelaria o download
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
 export const FUSO_DO_NAVEGADOR = Intl.DateTimeFormat().resolvedOptions().timeZone

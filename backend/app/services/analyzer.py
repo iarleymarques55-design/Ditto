@@ -158,6 +158,19 @@ def _enrich_with_llm(flow: Flow, client: LlmClient) -> None:
         step.irreversible = step.irreversible or item.sem_volta
 
 
+def prepare_for_manual_review(flow: Flow) -> None:
+    """Último recurso quando a análise falha por um erro inesperado: a gravação não fica presa
+    em "analisando". Cada clique passa a pedir confirmação, porque ninguém conferiu se ele tem
+    volta, e a pessoa revisa os passos antes de ativar."""
+    for step in flow.steps:
+        step.intent = step.intent or f"Passo {step.position}"
+        step.postcondition = step.postcondition or {"type": postcondition.NONE}
+        if step.action in {StepAction.CLICK, StepAction.PRESS}:
+            step.irreversible = True
+    flow.status = FlowStatus.AWAITING_CONFIRMATION
+    logger.warning("A gravação %s foi liberada para revisão sem análise.", flow.id)
+
+
 def analyze_flow(session: Session, flow: Flow, client: LlmClient | None = None) -> None:
     for step in flow.steps:
         target = current_target(step)

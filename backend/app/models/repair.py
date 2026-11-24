@@ -21,13 +21,17 @@ class Repair(IdTimestampMixin, Base):
     step_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("steps.id", ondelete="CASCADE"), index=True
     )
-    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    # Índices nas chaves estrangeiras: sem eles, apagar uma execução ou uma versão de passo fazia
+    # o Postgres varrer esta tabela inteira para cada linha apagada
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
     layer: Mapped[int] = mapped_column(Integer)
     old_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("step_versions.id", ondelete="SET NULL")
+        ForeignKey("step_versions.id", ondelete="SET NULL"), index=True
     )
     new_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("step_versions.id", ondelete="SET NULL")
+        ForeignKey("step_versions.id", ondelete="SET NULL"), index=True
     )
     score: Mapped[float | None] = mapped_column(Float)
     explanation: Mapped[str] = mapped_column(Text, default="")
@@ -44,8 +48,12 @@ class HelpRequest(IdTimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
-    run_item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("run_items.id", ondelete="CASCADE"))
-    step_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("steps.id", ondelete="CASCADE"))
+    run_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("run_items.id", ondelete="CASCADE"), index=True
+    )
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[HelpKind] = mapped_column(enum_column(HelpKind))
     status: Mapped[HelpStatus] = mapped_column(
         enum_column(HelpStatus), default=HelpStatus.OPEN, index=True

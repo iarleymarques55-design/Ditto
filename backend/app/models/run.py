@@ -2,7 +2,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +29,8 @@ from app.models.flow import Flow
 
 class Run(IdTimestampMixin, Base):
     __tablename__ = "runs"
+    # A lista de execuções do painel filtra pelo dono e ordena pela data
+    __table_args__ = (Index("ix_runs_owner_id_created_at", "owner_id", "created_at"),)
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
@@ -104,6 +115,8 @@ class Artifact(IdTimestampMixin, Base):
     """Só os metadados: o arquivo fica no armazenamento, fora do banco."""
 
     __tablename__ = "artifacts"
+    # A limpeza diária procura os arquivos vencidos pela data
+    __table_args__ = (Index("ix_artifacts_created_at", "created_at"),)
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True

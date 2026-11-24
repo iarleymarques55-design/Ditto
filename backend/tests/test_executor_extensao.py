@@ -33,6 +33,8 @@ from tests.test_execucao import disparar, situacoes, ver
 
 ORIGEM_EXTENSAO = Path(BACKEND_DIR).parent / "extension"
 ESPERA_S = 10
+# O Chrome identifica cada download por um UUID; o relé recusa qualquer outro formato
+GUID = "3f2c6a1e-8b7d-4c2a-9e5f-1a2b3c4d5e6f"
 
 Cabecalho = dict[str, str]
 
@@ -403,16 +405,16 @@ def test_worker_remoto_nunca_le_o_caminho_que_a_extensao_informa(
             event="cdpEvent",
             tabId=3,
             method="Page.downloadWillBegin",
-            params={"guid": "g1", "url": "https://portal.exemplo/a.pdf"},
+            params={"guid": GUID, "url": "https://portal.exemplo/a.pdf"},
         )
         chrome.evento(
             event="cdpEvent",
             tabId=3,
             method="Page.downloadProgress",
-            params={"guid": "g1", "state": "completed"},
+            params={"guid": GUID, "state": "completed"},
         )
 
-        arquivo = destino / "g1"
+        arquivo = destino / GUID
         esperar(lambda: arquivo.is_file() and arquivo.stat().st_size > 0)
         assert arquivo.read_bytes() == conteudo
         assert "readDownload" in [comando["method"] for comando in chrome.comandos]

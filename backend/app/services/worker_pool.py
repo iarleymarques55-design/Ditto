@@ -12,6 +12,7 @@ O Playwright não pode ser usado por mais de uma thread: cada linha abre o seu.
 
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -97,7 +98,9 @@ class Lane(threading.Thread):
     def _work(self, browser: Browser) -> bool | None:
         """Se trabalhou; None quando o navegador precisa ser aberto de novo."""
         try:
-            worked = worker_tasks.process_next_run(SessionLocal, browser, owner_id=self.owner_id)
+            worked = worker_tasks.process_next_run(
+                SessionLocal, browser, owner_id=self.owner_id, stop_worker=self._stopping
+            )
             if self.owner_id is not None:
                 # O Criar com IA só existe no Chrome da pessoa
                 worked = (
@@ -197,5 +200,9 @@ class WorkerPool:
         logger.info("Linha de trabalho %s aberta.", name)
 
     def join(self, timeout: float) -> None:
+        """Espera as linhas terminarem, com um prazo total (e não um prazo para cada uma). Todas
+        já receberam o aviso de parar pelo mesmo `stop` e entregam a execução de volta à fila
+        entre uma linha da planilha e outra."""
+        deadline = time.monotonic() + timeout
         for lane in list(self._lanes.values()):
-            lane.join(timeout)
+            lane.join(max(0.0, deadline - time.monotonic()))

@@ -1,6 +1,6 @@
 from logging.config import fileConfig
 
-from sqlalchemy import create_engine, pool
+from sqlalchemy import create_engine, pool, text
 
 from alembic import context
 from app.core.config import settings
@@ -31,6 +31,10 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# Número fixo e arbitrário que identifica a trava das migrações do Ditto
+_MIGRATION_LOCK = 4_242_001
+
+
 def run_migrations_online() -> None:
     """Aplica as migrações direto no banco."""
     engine = create_engine(database_url, poolclass=pool.NullPool)
@@ -39,6 +43,10 @@ def run_migrations_online() -> None:
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
+            # Duas cópias da API subindo juntas aplicariam a mesma migração ao mesmo tempo. A
+            # trava do Postgres faz a segunda esperar; quando ela entra, não há mais nada a fazer.
+            # É liberada sozinha no fim da transação
+            connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _MIGRATION_LOCK})
             context.run_migrations()
 
 

@@ -1,7 +1,6 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError
@@ -9,6 +8,7 @@ from app.models.enums import HelpKind, HelpStatus, ItemStatus, LogLevel, RunStat
 from app.models.flow import Step, StepVersion
 from app.models.repair import HelpRequest, Repair
 from app.models.run import Run
+from app.repositories.flow_repository import FlowRepository
 from app.repositories.repair_repository import RepairRepository
 from app.repositories.run_repository import RunRepository
 from app.schemas.common import Page
@@ -43,13 +43,9 @@ def save_new_version(
     explanation: str,
 ) -> Repair:
     """Reparo não apaga o passado: o caminho novo vira uma versão e o antigo continua guardado."""
-    old = session.scalar(
-        select(StepVersion).where(StepVersion.step_id == step.id, StepVersion.is_current.is_(True))
-    )
-    highest = (
-        session.scalar(select(func.max(StepVersion.version)).where(StepVersion.step_id == step.id))
-        or 0
-    )
+    versions = FlowRepository(session)
+    old = versions.current_version(step.id)
+    highest = versions.highest_version_number(step.id)
     if old is not None:
         old.is_current = False
 

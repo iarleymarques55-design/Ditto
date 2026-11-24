@@ -22,6 +22,10 @@ def normalize_host(value: str) -> str:
     host = value.strip().lower()
     if not _HOSTNAME.match(host):
         raise ValueError("domínio inválido")
+    # "com" ou "br" sozinhos liberariam todo site terminado neles (e a senha de um acesso salvo
+    # para "com" seria digitada em qualquer .com). Só "localhost" vale com um nome só
+    if "." not in host and host != "localhost":
+        raise ValueError("domínio incompleto: use o endereço inteiro, como portal.empresa.com.br")
     return host
 
 

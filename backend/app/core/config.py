@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     # SecretStr evita que segredos apareçam em logs e mensagens de erro
     database_url: SecretStr
     test_database_url: SecretStr | None = None
-    environment: Literal["development", "production"] = "development"
+    # Sem ENVIRONMENT, vale o modo mais seguro: /docs fechado e rede interna bloqueada
+    environment: Literal["development", "production"] = "production"
     cors_origins: list[str] = ["http://localhost:5173"]
     # Quantos proxies confiáveis ficam na frente da API. 0 no seu computador; 1 no Railway.
     # Com 0, o cabeçalho X-Forwarded-For é ignorado: ninguém escolhe o próprio IP

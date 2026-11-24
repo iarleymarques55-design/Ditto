@@ -12,6 +12,9 @@ from app.services.engine.egress_proxy import EgressProxy
 from app.services.engine.safety import looks_irreversible
 
 _ALLOWED_SCHEMES = {"http", "https"}
+# O maior arquivo que uma tarefa pode baixar. É o mesmo limite da extensão (DOWNLOAD_MAXIMO_BYTES
+# em extension/runner.js), que entrega o arquivo pela conexão quando a tarefa roda no Chrome
+MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024
 
 
 def host_matches(host: str, allowed_domains: list[str]) -> bool:
@@ -50,11 +53,21 @@ def _answer_dialog(dialog: Dialog) -> None:
 def launch_browser(playwright: Playwright, proxy: EgressProxy | None = None) -> Browser:
     """Tudo o que o navegador acessa passa pelo proxy, inclusive endereços locais e redirecionamentos."""
     egress = proxy or EgressProxy()
-    return playwright.chromium.launch(
-        headless=settings.browser_headless,
-        channel=settings.browser_channel,
-        proxy={"server": egress.url},
-    )
+    try:
+        browser = playwright.chromium.launch(
+            headless=settings.browser_headless,
+            channel=settings.browser_channel,
+            proxy={"server": egress.url},
+        )
+    except Exception:
+        if proxy is None:
+            egress.stop()
+        raise
+    if proxy is None:
+        # O proxy é deste navegador: fecha junto com ele, inclusive quando ele cai e a linha de
+        # trabalho abre outro. Sem isso, cada reabertura deixava uma porta e uma thread para trás
+        browser.on("disconnected", lambda _browser: egress.stop())
+    return browser
 
 
 # Navegadores que são o Chrome da pessoa: neles o Ditto só abre e fecha as próprias abas

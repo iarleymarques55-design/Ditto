@@ -24,6 +24,7 @@ const MOTIVOS_SEM_EXECUTOR = {
   'em-uso': 'Outro Chrome já está ligado nesta conta. Abra o Criar com IA nele.',
   conectando: 'O executor está ligado, mas o worker não respondeu. Confira se ele está no ar.',
   desconectado: 'O executor está ligado, mas o worker não respondeu. Confira se ele está no ar.',
+  'aguardando-confirmacao': 'Confirme a conta na janela que a extensão do Ditto abriu e tente de novo.',
 }
 
 function SemExecutor({ idTitulo, motivo, aoFechar }) {

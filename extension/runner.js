@@ -1,16 +1,62 @@
 // Executor: liga este Chrome ao worker do Ditto, para as tarefas rodarem aqui, com as contas da pessoa.
 // O worker manda comandos; cada linha abre uma aba ao lado da aba ativa, controlada por chrome.debugger.
 // Só as abas abertas pelo Ditto (e as janelas que elas abrirem) são controladas. As outras nunca.
+// Mesmo nas abas do Ditto, o worker não pode tudo: comandos que leem os cookies do navegador,
+// mexem em outras abas ou no navegador inteiro são recusados aqui (veja COMANDOS_BLOQUEADOS).
+// Assim, um worker invadido não consegue levar as sessões da pessoa para fora deste Chrome.
 
 // RELE_URL vem de config.js
 const CHAVE_TOKEN = 'dittoExecutorToken'
+const CHAVE_CONTA = 'dittoExecutorConta'
+const CHAVE_PENDENTE = 'dittoExecutorPendente'
 const CHAVE_ABAS = 'dittoExecutorAbas'
 const PING_MS = 20000
 const ESPERA_MAXIMA_MS = 30000
 const DOWNLOAD_LIMITE_MS = 110000
 const DOWNLOAD_RECENTE_MS = 10 * 60 * 1000
+const PEDIDO_VALIDO_MS = 5 * 60 * 1000
 const FECHAMENTO_TOKEN_RECUSADO = 4401
 const FECHAMENTO_CONTA_EM_USO = 4409
+
+// Comandos que o Ditto nunca usa nas abas dele e que dariam acesso além da página da tarefa:
+// cookies (inclusive os HttpOnly, que nenhum script da página lê), outras abas e o navegador
+const DOMINIOS_BLOQUEADOS = ['Storage.', 'Browser.', 'SystemInfo.']
+const COMANDOS_BLOQUEADOS = new Set([
+  'Network.getAllCookies',
+  'Network.getCookies',
+  'Network.setCookie',
+  'Network.setCookies',
+  'Network.deleteCookies',
+  'Network.clearBrowserCookies',
+  'Page.setDownloadBehavior',
+  'Target.createTarget',
+  'Target.closeTarget',
+  'Target.activateTarget',
+  'Target.attachToTarget',
+  'Target.attachToBrowserTarget',
+  'Target.exposeDevToolsProtocol',
+  'Target.getTargets',
+  'Target.setDiscoverTargets',
+  'Target.createBrowserContext',
+  'Target.disposeBrowserContext',
+  'Target.getBrowserContexts',
+])
+
+function comandoPermitido(metodo) {
+  if (typeof metodo !== 'string' || COMANDOS_BLOQUEADOS.has(metodo)) return false
+  return !DOMINIOS_BLOQUEADOS.some((dominio) => metodo.startsWith(dominio))
+}
+
+// As abas do Ditto só abrem páginas da web. Arquivos do computador (file:), páginas internas do
+// Chrome (chrome:, chrome-extension:, devtools:) e endereços que viram código ficam de fora.
+function enderecoPermitido(endereco) {
+  if (endereco === 'about:blank') return true
+  try {
+    return ['http:', 'https:'].includes(new URL(endereco).protocol)
+  } catch {
+    return false
+  }
+}
 
 // O token e o controle das abas viajam por aqui: fora deste computador, só com criptografia
 function releSeguro(endereco) {
@@ -29,6 +75,10 @@ let espera = 1000
 let relogioPing = null
 let relogioReconexao = null
 const abasDoDitto = new Set()
+// Downloads que nasceram nas abas do Ditto: endereço → quando começou. Só esses podem ser
+// entregues ao worker. Os downloads da pessoa, nas abas dela, nunca saem deste Chrome.
+const downloadsAnunciados = new Map()
+const downloadsDoDitto = new Set()
 
 const salvarAbas = () => chrome.storage.session.set({ [CHAVE_ABAS]: [...abasDoDitto] }).catch(() => {})
 
@@ -60,7 +110,8 @@ function conectarExecutor() {
 async function abrirConexao() {
   const { [CHAVE_TOKEN]: token } = await chrome.storage.local.get(CHAVE_TOKEN)
   if (!token) {
-    estadoExecutor = 'sem-token'
+    // Depois de uma recusa, o aviso continua até a pessoa ligar de novo pelo painel
+    if (estadoExecutor !== 'recusado') estadoExecutor = 'sem-token'
     return
   }
   if (!releSeguro(RELE_URL)) {
@@ -87,7 +138,9 @@ async function abrirConexao() {
     clearInterval(relogioPing)
     soltarTodas()
     if (evento.code === FECHAMENTO_TOKEN_RECUSADO) {
+      // Token vencido ou revogado: apagar, para não tentar de novo a cada minuto para sempre
       estadoExecutor = 'recusado'
+      chrome.storage.local.remove([CHAVE_TOKEN, CHAVE_CONTA]).catch(() => {})
       return
     }
     // Outro Chrome já está ligado nesta conta: tenta de novo só no alarme de cada minuto
@@ -106,24 +159,99 @@ function agendarReconexao() {
   espera = Math.min(espera * 2, ESPERA_MAXIMA_MS)
 }
 
-async function salvarTokenDoExecutor(token) {
-  await chrome.storage.local.set({ [CHAVE_TOKEN]: token })
-  espera = 1000
-  // Uma conexão que já estava abrindo, com o token antigo, termina antes e depois dá lugar à nova
+async function fecharConexao() {
+  // Uma conexão que já estava abrindo termina antes e depois é fechada
   await conexaoEmAndamento
+  clearTimeout(relogioReconexao)
   if (socket) {
     const antigo = socket
     socket = null
+    clearInterval(relogioPing)
     antigo.close()
-    soltarTodas()
   }
+  soltarTodas()
+}
+
+async function salvarTokenDoExecutor(token, conta = null) {
+  await chrome.storage.local.set({ [CHAVE_TOKEN]: token, [CHAVE_CONTA]: conta })
+  espera = 1000
+  await fecharConexao()
   await conectarExecutor()
+}
+
+// "Desligar este Chrome": apaga o token e fecha a conexão. As tarefas voltam a esperar na fila.
+async function desligarExecutor() {
+  await chrome.storage.local.remove([CHAVE_TOKEN, CHAVE_CONTA])
+  await chrome.storage.session.remove(CHAVE_PENDENTE).catch(() => {})
+  await fecharConexao()
+  estadoExecutor = 'sem-token'
+}
+
+async function contaLigada() {
+  const { [CHAVE_CONTA]: conta = null } = await chrome.storage.local.get(CHAVE_CONTA)
+  return conta
+}
+
+async function ligacaoPendente() {
+  const { [CHAVE_PENDENTE]: pendente = null } = await chrome.storage.session.get(CHAVE_PENDENTE)
+  if (!pendente || Date.now() - pendente.pedidoEm > PEDIDO_VALIDO_MS) return null
+  return pendente
+}
+
+// O painel pede para ligar este Chrome a uma conta, mas quem decide é a pessoa, com um clique na
+// janela da extensão. Uma página que se passasse pelo painel não consegue ligar este Chrome (com
+// as contas logadas nele) à conta de outra pessoa sem que ela veja e aceite.
+async function pedirLigacao(token, _contaInformadaPelaPagina) {
+  // O e-mail mostrado na confirmação sai do próprio token, assinado pelo servidor. O que a página
+  // informa é ignorado: uma página mal-intencionada poderia dizer "sua conta" e mandar o token de
+  // outra pessoa. Se ela mexer no e-mail do token, a assinatura quebra e o relé recusa a ligação
+  await chrome.storage.session.set({
+    [CHAVE_PENDENTE]: { token, conta: emailDoToken(token), pedidoEm: Date.now() },
+  })
+  await chrome.windows
+    .create({ url: chrome.runtime.getURL('popup.html?ligar=1'), type: 'popup', width: 380, height: 360, focused: true })
+    .catch(() => {})
+  return 'aguardando-confirmacao'
+}
+
+function emailDoToken(token) {
+  try {
+    const parte = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const dados = JSON.parse(atob(parte.padEnd(parte.length + ((4 - (parte.length % 4)) % 4), '=')))
+    return typeof dados.email === 'string' ? dados.email.slice(0, 200) : null
+  } catch {
+    return null
+  }
+}
+
+async function confirmarLigacao() {
+  const pendente = await ligacaoPendente()
+  await chrome.storage.session.remove(CHAVE_PENDENTE)
+  if (!pendente) return false
+  await salvarTokenDoExecutor(pendente.token, pendente.conta)
+  return true
+}
+
+async function recusarLigacao() {
+  await chrome.storage.session.remove(CHAVE_PENDENTE)
+}
+
+async function resumoDoExecutor() {
+  const pendente = await ligacaoPendente()
+  return {
+    runner: pendente ? 'aguardando-confirmacao' : statusDoExecutor(),
+    runnerAccount: await contaLigada(),
+    // Só o e-mail: o token pendente nunca sai do serviço da extensão
+    runnerPending: pendente ? { account: pendente.conta } : null,
+  }
 }
 
 function tratarDoRele(ws, mensagem) {
   if (mensagem.type === 'welcome') {
     estadoExecutor = 'conectado'
     espera = 1000
+    // Se o relé informar a conta do token, é ela que aparece na janela da extensão
+    if (typeof mensagem.email === 'string') chrome.storage.local.set({ [CHAVE_CONTA]: mensagem.email }).catch(() => {})
     clearInterval(relogioPing)
     // Mensagens no socket mantêm o service worker acordado
     relogioPing = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('{"type":"ping"}'), PING_MS)
@@ -142,10 +270,16 @@ function exigirAbaDoDitto(tabId) {
   if (!abasDoDitto.has(tabId)) throw new Error('Esta aba não foi aberta pelo Ditto.')
 }
 
+function exigirDownloadDoDitto(downloadId) {
+  if (!downloadsDoDitto.has(downloadId)) throw new Error('Este download não foi feito por uma aba do Ditto.')
+}
+
 async function adotar(tabId) {
+  // A aba só vira do Ditto depois que o controle dá certo. Se o Chrome recusar (DevTools aberto,
+  // outra extensão depurando), ela não fica marcada como do Ditto.
+  await chrome.debugger.attach({ tabId }, '1.3')
   abasDoDitto.add(tabId)
   await salvarAbas()
-  await chrome.debugger.attach({ tabId }, '1.3')
   const { targetInfo } = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
   return { tabId, targetInfo }
 }
@@ -153,11 +287,18 @@ async function adotar(tabId) {
 async function executar(metodo, params) {
   switch (metodo) {
     case 'createTab': {
-      // Ao lado da aba em que a pessoa está, na mesma janela
+      // Ao lado da aba em que a pessoa está, na mesma janela. Ela abre na frente de propósito:
+      // numa aba em segundo plano o Chrome para de desenhar a página, e os cliques da tarefa travam.
       const [ativa] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
       const posicao = ativa ? { windowId: ativa.windowId, index: ativa.index + 1 } : {}
       const aba = await chrome.tabs.create({ url: 'about:blank', active: true, ...posicao })
-      return adotar(aba.id)
+      try {
+        return await adotar(aba.id)
+      } catch (erro) {
+        // Sem controle, a aba não serve para nada: não fica aberta à toa
+        await chrome.tabs.remove(aba.id).catch(() => {})
+        throw erro
+      }
     }
     case 'closeTab':
       exigirAbaDoDitto(params.tabId)
@@ -165,6 +306,10 @@ async function executar(metodo, params) {
       return {}
     case 'send':
       exigirAbaDoDitto(params.tabId)
+      if (!comandoPermitido(params.method)) throw new Error(`${params.method} não é permitido nas abas do Ditto.`)
+      if (params.method === 'Page.navigate' && !enderecoPermitido(params.params?.url)) {
+        throw new Error('As abas do Ditto só abrem endereços http:// ou https://.')
+      }
       return chrome.debugger.sendCommand(
         params.sessionId ? { tabId: params.tabId, sessionId: params.sessionId } : { tabId: params.tabId },
         params.method,
@@ -173,8 +318,11 @@ async function executar(metodo, params) {
     case 'finishDownload':
       return esperarDownload(params.url)
     case 'readDownload':
+      exigirDownloadDoDitto(params.downloadId)
       return lerDownload(params.downloadId)
     case 'removeDownload':
+      exigirDownloadDoDitto(params.downloadId)
+      downloadsDoDitto.delete(params.downloadId)
       await chrome.downloads.removeFile(params.downloadId).catch(() => {})
       await chrome.downloads.erase({ id: params.downloadId }).catch(() => {})
       return {}
@@ -186,12 +334,32 @@ async function executar(metodo, params) {
   }
 }
 
+function anunciarDownload(url) {
+  if (typeof url !== 'string' || !url) return
+  const agora = Date.now()
+  for (const [endereco, quando] of downloadsAnunciados) {
+    if (agora - quando > DOWNLOAD_RECENTE_MS) downloadsAnunciados.delete(endereco)
+  }
+  downloadsAnunciados.set(url, agora)
+}
+
 async function esperarDownload(url) {
+  // Só um download que a própria aba do Ditto anunciou. Aceitar qualquer endereço seria um jeito
+  // de pegar arquivos que a pessoa baixou nas abas dela.
+  const anunciado = downloadsAnunciados.get(url)
+  if (anunciado === undefined || Date.now() - anunciado > DOWNLOAD_RECENTE_MS) {
+    throw new Error('Este download não foi feito por uma aba do Ditto.')
+  }
+  // Um download do mesmo endereço feito antes, pela pessoa, fica de fora
+  const desde = new Date(anunciado - 5000).toISOString()
   const limite = Date.now() + DOWNLOAD_LIMITE_MS
   while (Date.now() < limite) {
-    const desde = new Date(Date.now() - DOWNLOAD_RECENTE_MS).toISOString()
     const [item] = await chrome.downloads.search({ url, startedAfter: desde, orderBy: ['-startTime'], limit: 1 })
-    if (item?.state === 'complete' && item.filename) return { downloadId: item.id, path: item.filename }
+    if (item?.state === 'complete' && item.filename) {
+      downloadsAnunciados.delete(url)
+      downloadsDoDitto.add(item.id)
+      return { downloadId: item.id, path: item.filename }
+    }
     if (item?.state === 'interrupted') throw new Error('O download foi interrompido.')
     await new Promise((resolver) => setTimeout(resolver, 300))
   }
@@ -262,6 +430,7 @@ function soltarTodas() {
 
 chrome.debugger.onEvent.addListener((origem, method, params) => {
   if (!abasDoDitto.has(origem.tabId)) return
+  if (method === 'Page.downloadWillBegin') anunciarDownload(params?.url)
   enviarAoRele({ event: 'cdpEvent', tabId: origem.tabId, sessionId: origem.sessionId, method, params })
 })
 
@@ -276,6 +445,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (!abasDoDitto.delete(tabId)) return
   salvarAbas()
   enviarAoRele({ event: 'tabDetached', tabId })
+})
+
+// Uma aba do Ditto que for parar num endereço fora da web (arquivo do computador, página interna
+// do Chrome) é fechada na hora, e a linha para
+chrome.webNavigation.onBeforeNavigate.addListener((detalhes) => {
+  if (detalhes.frameId !== 0 || !abasDoDitto.has(detalhes.tabId) || enderecoPermitido(detalhes.url)) return
+  chrome.tabs.remove(detalhes.tabId).catch(() => {})
 })
 
 // Janela aberta pela própria aba do Ditto (link com target=_blank, window.open)

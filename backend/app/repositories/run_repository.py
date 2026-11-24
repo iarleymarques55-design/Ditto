@@ -2,7 +2,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import case, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -11,6 +11,22 @@ from app.models.flow import Flow, Step
 from app.models.run import Artifact, Run, RunItem, RunLogEntry, StepEvent
 
 MAX_LOG_LINES = 60
+# Estados em que a execução ainda vai rodar ou está rodando
+OPEN_RUN_STATUSES = (RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_HUMAN)
+
+# Para a tela da execução: os textos capturados e só o tamanho das tabelas, sem trazer as
+# tabelas inteiras do banco a cada consulta do painel
+_OUTPUT_SUMMARY = text(
+    """
+    SELECT item.id,
+           entry.key,
+           CASE WHEN jsonb_typeof(entry.value) = 'string' THEN entry.value #>> '{}' END,
+           CASE WHEN jsonb_typeof(entry.value) = 'array' THEN jsonb_array_length(entry.value) END
+    FROM run_items AS item
+    CROSS JOIN LATERAL jsonb_each(item.output) AS entry
+    WHERE item.run_id = :run_id AND jsonb_typeof(item.output) = 'object'
+    """
+)
 
 
 @dataclass
@@ -21,6 +37,14 @@ class RunCounts:
     failed: int = 0
 
 
+@dataclass
+class OutputSummary:
+    """O que a tela mostra do resultado de uma linha."""
+
+    values: dict[str, str]
+    table_rows: dict[str, int]
+
+
 class RunRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -29,15 +53,31 @@ class RunRepository:
         self.session.add(run)
         return run
 
-    def get_owned(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> Run | None:
+    def get_owned(
+        self, run_id: uuid.UUID, owner_id: uuid.UUID, *, with_output: bool = True
+    ) -> Run | None:
+        """Sem `with_output`, o resultado das linhas (que pode ter tabelas grandes) fica no banco:
+        a tela consulta a execução a cada poucos segundos e só precisa do resumo."""
+        items = selectinload(Run.items)
+        options = [
+            joinedload(Run.flow).selectinload(Flow.steps),
+            items.selectinload(RunItem.artifacts),
+        ]
+        if not with_output:
+            options.append(selectinload(Run.items).defer(RunItem.output))
         return self.session.scalar(
-            select(Run)
-            .where(Run.id == run_id, Run.owner_id == owner_id)
-            .options(
-                joinedload(Run.flow).selectinload(Flow.steps),
-                selectinload(Run.items).selectinload(RunItem.artifacts),
-            )
+            select(Run).where(Run.id == run_id, Run.owner_id == owner_id).options(*options)
         )
+
+    def output_summaries(self, run_id: uuid.UUID) -> dict[uuid.UUID, OutputSummary]:
+        summaries: dict[uuid.UUID, OutputSummary] = {}
+        for item_id, key, value, rows in self.session.execute(_OUTPUT_SUMMARY, {"run_id": run_id}):
+            summary = summaries.setdefault(item_id, OutputSummary({}, {}))
+            if value is not None:
+                summary.values[key] = value
+            elif rows is not None:
+                summary.table_rows[key] = rows
+        return summaries
 
     def list_owned(
         self,
@@ -121,7 +161,7 @@ class RunRepository:
             .order_by(Run.finished_at.desc())
             .limit(1)
         )
-        return self.get_owned(run_id, owner_id) if run_id else None
+        return self.get_owned(run_id, owner_id, with_output=False) if run_id else None
 
     def count_copies_since(self, owner_id: uuid.UUID, since: datetime) -> int:
         return (
@@ -166,6 +206,37 @@ class RunRepository:
     def has_running_for_flow(self, flow_id: uuid.UUID) -> bool:
         running = select(Run.id).where(Run.flow_id == flow_id, Run.status == RunStatus.RUNNING)
         return self.session.scalar(running.limit(1)) is not None
+
+    def has_open_for_flow(self, flow_id: uuid.UUID) -> bool:
+        """Se a tarefa já tem uma execução na fila, rodando ou esperando alguém."""
+        open_run = select(Run.id).where(Run.flow_id == flow_id, Run.status.in_(OPEN_RUN_STATUSES))
+        return self.session.scalar(open_run.limit(1)) is not None
+
+    def items_of(self, run_id: uuid.UUID) -> list[RunItem]:
+        return list(
+            self.session.scalars(
+                select(RunItem).where(RunItem.run_id == run_id).order_by(RunItem.position)
+            )
+        )
+
+    def count_log_since(self, run_id: uuid.UUID, message: str, since: datetime) -> int:
+        return (
+            self.session.scalar(
+                select(func.count())
+                .select_from(RunLogEntry)
+                .where(
+                    RunLogEntry.run_id == run_id,
+                    RunLogEntry.message == message,
+                    RunLogEntry.created_at >= since,
+                )
+            )
+            or 0
+        )
+
+    def lock_status(self, run_id: uuid.UUID) -> RunStatus | None:
+        """Trava a execução até o próximo commit e devolve o status atual dela no banco. Quem
+        cancela também trava antes de mudar: um lado sempre espera o outro terminar."""
+        return self.session.scalar(select(Run.status).where(Run.id == run_id).with_for_update())
 
     def claim_queued(self, owner_id: uuid.UUID | None = None) -> Run | None:
         """SKIP LOCKED: dois workers nunca pegam a mesma execução."""

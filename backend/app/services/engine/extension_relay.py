@@ -17,6 +17,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 import secrets
 import shutil
 import threading
@@ -29,17 +30,27 @@ from typing import Any
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from app.core.rate_limit import ip_behind_proxies
+from app.services.engine.browser import MAX_DOWNLOAD_BYTES
+
 logger = logging.getLogger(__name__)
 
-_HELLO_TIMEOUT_SECONDS = 10
+_HELLO_TIMEOUT_SECONDS = 5
 # Um download grande pode demorar: é o maior tempo que um comando à extensão pode levar
 _EXTENSION_TIMEOUT_SECONDS = 120
 # Antes do token, só cabe a apresentação: ninguém de fora ocupa memória do worker
 _MAX_HELLO_BYTES = 16 * 1024
 # Capturas de tela e arquivos baixados vêm em base64 e podem passar de alguns megabytes
 _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
-_MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024
+# O mesmo limite do navegador do worker e da extensão
+_MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_BYTES
 _MAX_CONNECTIONS = 500
+# Conexões ainda sem token vindas do mesmo IP: sem isto, um script ocupava as 500 vagas e
+# nenhuma extensão conseguia ligar
+_MAX_PENDING_PER_IP = 10
+# O Chrome identifica cada download por um UUID. O valor vira nome de arquivo no worker, então
+# qualquer outra coisa (como "../../") é recusada
+_DOWNLOAD_GUID = re.compile(r"^[0-9A-Za-z-]{8,64}$")
 _CLOSE_POLICY = 1008
 _CLOSE_TRY_LATER = 1013
 _CLOSE_UNAUTHORIZED = 4401
@@ -121,6 +132,7 @@ class ExtensionRelay:
         # alterada, para ninguém ler a lista no meio de uma mudança
         self._connected: tuple[uuid.UUID, ...] = ()
         self._connections = 0
+        self._pending_by_ip: dict[str, int] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
 
     # ─── Usado pelo worker ────────────────────────────────────────────────
@@ -210,13 +222,37 @@ class ExtensionRelay:
             await connection.close(_CLOSE_TRY_LATER, "Muitas conexões. Tente de novo em instantes.")
             return
 
+        ip = _client_ip(connection)
+        if self._pending_by_ip.get(ip, 0) >= _MAX_PENDING_PER_IP:
+            await connection.close(_CLOSE_TRY_LATER, "Muitas conexões. Tente de novo em instantes.")
+            return
+
         self._connections += 1
+        self._pending_by_ip[ip] = self._pending_by_ip.get(ip, 0) + 1
+        pending = True
+
+        def authenticated() -> None:
+            nonlocal pending
+            if pending:
+                pending = False
+                self._release_pending(ip)
+
         try:
-            await self._welcome(connection)
+            await self._welcome(connection, authenticated)
         finally:
             self._connections -= 1
+            authenticated()
 
-    async def _welcome(self, connection: ServerConnection) -> None:
+    def _release_pending(self, ip: str) -> None:
+        left = self._pending_by_ip.get(ip, 1) - 1
+        if left > 0:
+            self._pending_by_ip[ip] = left
+        else:
+            self._pending_by_ip.pop(ip, None)
+
+    async def _welcome(
+        self, connection: ServerConnection, authenticated: Callable[[], None]
+    ) -> None:
         try:
             hello = json.loads(await asyncio.wait_for(connection.recv(), _HELLO_TIMEOUT_SECONDS))
             token = str(hello.get("token", "")) if isinstance(hello, dict) else ""
@@ -231,6 +267,7 @@ class ExtensionRelay:
             )
             return
 
+        authenticated()
         old = self._links.get(user_id)
         if old is not None:
             if await _is_alive(old.extension):
@@ -251,7 +288,7 @@ class ExtensionRelay:
         # Depois do token, cabem as capturas de tela e os arquivos baixados. Vale a partir do
         # próximo quadro, e a extensão só manda algo depois do "welcome"
         connection.protocol.max_message_size = _MAX_MESSAGE_BYTES
-        await connection.send(json.dumps({"type": "welcome"}))
+        await connection.send(json.dumps({"type": "welcome", "email": _token_email(token)}))
         logger.info("Extensão conectada: as tarefas desta conta rodam no Chrome dela.")
 
         try:
@@ -493,8 +530,16 @@ class ExtensionRelay:
         elif method == "Target.detachedFromTarget":
             tab.children.discard(params.get("sessionId", ""))
         elif method == "Page.downloadWillBegin":
-            link.downloads[params["guid"]] = params["url"]
+            guid = params.get("guid")
+            if not isinstance(guid, str) or not _DOWNLOAD_GUID.fullmatch(guid):
+                logger.warning("Download com identificador inválido recusado.")
+                return
+            link.downloads[guid] = params["url"]
             await self._send_cdp(link, {"method": "Browser.downloadWillBegin", "params": params})
+        elif method == "Page.downloadProgress" and not _DOWNLOAD_GUID.fullmatch(
+            str(params.get("guid", ""))
+        ):
+            return
         elif method == "Page.downloadProgress" and params.get("state") == "completed":
             self._spawn(self._finish_download(link, params))
         elif method == "Page.downloadProgress" and params.get("state") == "canceled":
@@ -517,9 +562,9 @@ class ExtensionRelay:
             if url is None or link.download_path is None:
                 raise RelayError("Download sem origem conhecida.")
             found = await self._call_extension(link, "finishDownload", url=url)
-            target = Path(link.download_path) / guid
+            target = _inside(Path(link.download_path), guid)
             source = Path(found["path"])
-            if self._local_downloads and source.is_file():
+            if self._local_downloads and _is_plain_file(source):
                 await asyncio.to_thread(shutil.copyfile, source, target)
             else:
                 # Worker em outra máquina: o conteúdo vem pela conexão
@@ -549,6 +594,47 @@ async def _is_alive(connection: ServerConnection) -> bool:
     except (ConnectionClosed, TimeoutError):
         return False
     return True
+
+
+def _token_email(token: str) -> str | None:
+    """O e-mail gravado no token. Só é lido depois que o token passou pela conferência."""
+    try:
+        parts = token.split(".")
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (IndexError, ValueError, binascii.Error):
+        return None
+    email = payload.get("email") if isinstance(payload, dict) else None
+    return email if isinstance(email, str) else None
+
+
+def _client_ip(connection: ServerConnection) -> str:
+    address = connection.remote_address
+    peer = str(address[0]) if address else "desconhecido"
+    request = connection.request
+    forwarded = request.headers.get("X-Forwarded-For", "") if request is not None else ""
+    return ip_behind_proxies(peer, forwarded)
+
+
+def _inside(folder: Path, name: str) -> Path:
+    """O caminho de `name` dentro de `folder`, ou erro se ele tentar sair dela."""
+    if not _DOWNLOAD_GUID.fullmatch(name):
+        raise RelayError("Identificador de download inválido.")
+    base = folder.resolve()
+    target = (base / name).resolve()
+    if not target.is_relative_to(base) or target == base:
+        raise RelayError("Identificador de download inválido.")
+    return target
+
+
+def _is_plain_file(path: Path) -> bool:
+    """Arquivo comum (não atalho), dentro do limite de tamanho. No modo local é a extensão quem
+    informa o caminho: sem isto, ela poderia pedir a cópia de qualquer arquivo da máquina."""
+    try:
+        return (
+            path.is_file() and not path.is_symlink() and path.stat().st_size <= _MAX_DOWNLOAD_BYTES
+        )
+    except OSError:
+        return False
 
 
 def _bound_port(server: Server) -> int:

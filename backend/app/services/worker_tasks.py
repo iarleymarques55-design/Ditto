@@ -21,33 +21,75 @@ from app.repositories.run_repository import RunRepository
 from app.repositories.schedule_repository import ScheduleRepository
 from app.services import run_lifecycle, storage
 from app.services.ai_explorer import AiExplorer, BrowserUnavailableError, claim_next_draft
-from app.services.analyzer import analyze_flow
+from app.services.analyzer import analyze_flow, prepare_for_manual_review
 from app.services.engine.llm_explorer import LlmExplorer
 from app.services.engine.llm_repair import LlmRepairer
-from app.services.llm_client import LlmClient
-from app.services.run_processor import RunProcessor, items_of, requeue_item_after_crash
+from app.services.llm_client import LlmClient, LlmUnavailableError
+from app.services.run_lifecycle import HEARTBEAT_SECONDS
+from app.services.run_processor import (
+    RunProcessor,
+    diagnostics_key_for,
+    requeue_item_after_crash,
+)
 from app.services.schedule_service import next_occurrence
 
 logger = logging.getLogger(__name__)
 
-_HEARTBEAT_SECONDS = 30
+# A limpeza apaga em lotes, até acabar o que venceu. O teto por volta só existe para a volta
+# não ficar presa por muito tempo; o que sobrar sai na próxima
+_PURGE_BATCH = 200
+_PURGE_MAX_BATCHES = 10
+
+
+class _WithoutLlm:
+    """Para a segunda tentativa da análise: as regras do Ditto, sem chamar a IA."""
+
+    def chat_json(self, _system: str, _user: str) -> dict:
+        raise LlmUnavailableError("análise sem a IA")
 
 
 def analyze_next_flow(session: Session, client: LlmClient | None = None) -> bool:
-    flow = FlowRepository(session).claim_for_analysis()
+    """Analisa a gravação mais antiga na fila. Uma falha inesperada nunca deixa a gravação
+    presa em "analisando" (ela voltaria em toda volta e seguraria as outras): tenta de novo
+    sem a IA e, se ainda falhar, libera a gravação para a pessoa revisar à mão."""
+    repository = FlowRepository(session)
+    flow = repository.claim_for_analysis()
     if flow is None:
         session.rollback()
         return False
-    analyze_flow(session, flow, client)
+    flow_id = flow.id
+    try:
+        analyze_flow(session, flow, client)
+        return True
+    except Exception:
+        logger.exception("A análise da gravação %s falhou. Tentando sem a IA.", flow_id)
+        session.rollback()
+
+    flow = repository.lock_for_analysis(flow_id)
+    if flow is None:
+        session.rollback()
+        return True
+    try:
+        analyze_flow(session, flow, _WithoutLlm())
+        return True
+    except Exception:
+        logger.exception("A análise sem a IA da gravação %s também falhou.", flow_id)
+        session.rollback()
+
+    flow = repository.lock_for_analysis(flow_id)
+    if flow is not None:
+        prepare_for_manual_review(flow)
+    session.commit()
     return True
 
 
 def recover_stale_runs(session: Session) -> int:
     """Um worker que caiu para de dar sinal: a execução volta para a fila, sem refazer o que já terminou."""
     limit = datetime.now(UTC) - timedelta(minutes=settings.stale_run_minutes)
-    stale = RunRepository(session).list_stale(limit)
+    runs = RunRepository(session)
+    stale = runs.list_stale(limit)
     for run in stale:
-        for item in items_of(session, run):
+        for item in runs.items_of(run.id):
             requeue_item_after_crash(item)
         run.status = RunStatus.QUEUED
         run_lifecycle.add_log(
@@ -139,9 +181,17 @@ def expire_help_requests(session: Session) -> int:
 def fire_due_schedules(session: Session) -> int:
     now = datetime.now(UTC)
     due = ScheduleRepository(session).claim_due(now)
+    runs = RunRepository(session)
     for schedule in due:
         schedule.last_run_at = now
         schedule.next_run_at = next_occurrence(schedule.cron, schedule.timezone, now)
+        if runs.has_open_for_flow(schedule.flow_id):
+            # A anterior ainda não terminou (o Chrome da pessoa pode estar desligado): uma cópia
+            # por vez, em vez de uma fila que cresce a cada horário
+            logger.info(
+                "Agenda %s pulou este horário: a execução anterior não terminou.", schedule.id
+            )
+            continue
         try:
             run_lifecycle.ensure_can_run(session, schedule.flow)
             run_lifecycle.create_run(
@@ -159,15 +209,33 @@ def fire_due_schedules(session: Session) -> int:
 
 
 def purge_expired_artifacts(session: Session) -> int:
+    """Primeiro sai do banco, depois do armazenamento: se apagar um arquivo falhar, sobra um
+    arquivo sem dono, e nunca um registro apontando para um arquivo que não existe mais."""
     limit = datetime.now(UTC) - timedelta(days=settings.artifact_retention_days)
     runs = RunRepository(session)
-    artifacts = runs.list_expired_artifacts(limit)
-    for artifact in artifacts:
-        storage.delete(artifact.storage_key)
-    if artifacts:
+    total = 0
+    for _ in range(_PURGE_MAX_BATCHES):
+        artifacts = runs.list_expired_artifacts(limit, _PURGE_BATCH)
+        if not artifacts:
+            break
+        keys = [artifact.storage_key for artifact in artifacts]
+        # Os detalhes da falha ficam ao lado da tela, sem registro próprio: saem junto com ela
+        keys.extend(
+            diagnostics
+            for artifact in artifacts
+            if (diagnostics := diagnostics_key_for(artifact.storage_key)) is not None
+        )
         runs.delete_artifacts([artifact.id for artifact in artifacts])
-    session.commit()
-    return len(artifacts)
+        session.commit()
+        for key in keys:
+            try:
+                storage.delete(key)
+            except Exception:
+                logger.warning("Não consegui apagar um arquivo vencido do armazenamento.")
+        total += len(artifacts)
+        if len(artifacts) < _PURGE_BATCH:
+            break
+    return total
 
 
 def claim_next_run(session: Session, owner_id: uuid.UUID | None = None) -> uuid.UUID | None:
@@ -183,7 +251,7 @@ def claim_next_run(session: Session, owner_id: uuid.UUID | None = None) -> uuid.
     run.status = RunStatus.RUNNING
     run.started_at = run.started_at or now
     run.heartbeat_at = now
-    for item in items_of(session, run):
+    for item in runs.items_of(run.id):
         if item.status == ItemStatus.RUNNING:
             item.status = ItemStatus.PENDING
     session.commit()
@@ -193,10 +261,19 @@ def claim_next_run(session: Session, owner_id: uuid.UUID | None = None) -> uuid.
 def _heartbeat_loop(
     session_factory: Callable[[], Session], run_id: uuid.UUID, stop: threading.Event
 ) -> None:
-    while not stop.wait(_HEARTBEAT_SECONDS):
-        with session_factory() as session:
-            RunRepository(session).touch_heartbeat(run_id, datetime.now(UTC))
-            session.commit()
+    """Avisa que a execução continua viva enquanto um passo longo roda. Uma falha do banco não
+    pode parar o aviso: sem ele, a execução voltaria para a fila e rodaria duas vezes."""
+    while not stop.wait(HEARTBEAT_SECONDS):
+        try:
+            with session_factory() as session:
+                RunRepository(session).touch_heartbeat(run_id, datetime.now(UTC))
+                session.commit()
+        except Exception:
+            logger.warning(
+                "Não consegui avisar que a execução %s continua viva. Tento de novo.",
+                run_id,
+                exc_info=True,
+            )
 
 
 def process_next_run(
@@ -204,7 +281,10 @@ def process_next_run(
     browser: Browser,
     repairer: LlmRepairer | None = None,
     owner_id: uuid.UUID | None = None,
+    stop_worker: threading.Event | None = None,
 ) -> bool:
+    """Com `stop_worker` ligado (o worker está desligando), a execução volta para a fila entre
+    uma linha e outra, em vez de seguir até ser derrubada."""
     with session_factory() as session:
         run_id = claim_next_run(session, owner_id)
     if run_id is None:
@@ -217,7 +297,12 @@ def process_next_run(
     heartbeat.start()
     try:
         with session_factory() as session:
-            RunProcessor(session, session.get(Run, run_id), browser, repairer).process()
+            RunProcessor(
+                session, session.get(Run, run_id), browser, repairer, stop=stop_worker
+            ).process()
+    except BrowserUnavailableError:
+        # A execução já voltou para a fila: quem chama abre o navegador de novo
+        raise
     except Exception:
         # Para a execução, nunca o worker: as outras da fila continuam
         logger.exception("Falha inesperada na execução %s", run_id)

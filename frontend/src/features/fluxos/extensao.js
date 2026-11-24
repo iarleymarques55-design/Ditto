@@ -51,18 +51,28 @@ export async function iniciarGravacao({ nome, url }) {
   if (!resposta.ok) throw new Error(resposta.error)
 }
 
-// Estado do executor, que roda as tarefas neste Chrome: sem-token, conectando, conectado, desconectado ou recusado
+// Estado do executor, que roda as tarefas neste Chrome: sem-token, aguardando-confirmacao,
+// conectando, conectado, desconectado, em-uso ou recusado
 export async function statusDoExecutor() {
   if (!extensaoInstalada()) return 'sem-extensao'
   const resposta = await consultarExtensao()
   return resposta?.ok ? (resposta.runner ?? 'sem-token') : 'sem-resposta'
 }
 
-export async function ligarExecutor() {
+// A extensão abre uma janela para a pessoa confirmar a conta antes de ligar
+export async function ligarExecutor(conta) {
   // Token próprio do executor: não vale em nenhuma rota da API, só para o worker reconhecer a conta
   const { token } = await pedir('/auth/runner-token', { metodo: 'POST' })
-  const resposta = await falarComExtensao('connect-runner', { token })
+  const resposta = await falarComExtensao('connect-runner', { token, account: conta })
   if (!resposta) throw new Error('A extensão não respondeu. Recarregue a página e tente de novo.')
   if (!resposta.ok) throw new Error(resposta.error)
   return resposta.runner
+}
+
+// Encerra os tokens do executor desta conta no servidor e desliga a extensão deste Chrome.
+// Falha de rede ou extensão ausente não impedem o resto: desligar precisa funcionar sempre.
+export async function desligarExecutor() {
+  const noServidor = pedir('/auth/runner-token', { metodo: 'DELETE' }).catch(() => null)
+  if (extensaoInstalada()) await falarComExtensao('disconnect-runner')
+  await noServidor
 }

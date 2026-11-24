@@ -91,7 +91,9 @@ class Variable(IdTimestampMixin, Base):
     flow_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("flows.id", ondelete="CASCADE"), index=True
     )
-    step_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("steps.id", ondelete="SET NULL"))
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("steps.id", ondelete="SET NULL"), index=True
+    )
     name: Mapped[str] = mapped_column(String(64))
     label: Mapped[str] = mapped_column(String(120))
     example: Mapped[str] = mapped_column(Text, default="")
