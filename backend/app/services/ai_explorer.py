@@ -41,6 +41,7 @@ from app.services.engine.snapshot import (
     take_snapshot_with_frames,
 )
 from app.services.flow_service import FlowService
+from app.services.run_lifecycle import HEARTBEAT_SECONDS
 from app.services.templating import slugify
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,6 @@ _QUIET_SECONDS = 0.5
 _SETTLE_MAX_SECONDS = 4
 _DOWNLOAD_WAIT_SECONDS = 3
 _ANSWER_POLL_SECONDS = 1.0
-_HEARTBEAT_SECONDS = 30
 _MAX_LLM_FAILURES = 3
 _MAX_EVENTS = 300
 _ALLOWED_KEYS = {"Enter", "Tab", "Escape"}
@@ -62,6 +62,8 @@ _MAX_AI_QUESTIONS = 3
 # Tela sem nada costuma estar carregando: o Ditto espera sozinho em vez de perguntar
 _EMPTY_SCREEN_RETRIES = 4
 _EMPTY_SCREEN_WAIT_MS = 1500
+# Valor curto ("Sim", "10") aparece em qualquer tela por acaso: só a partir daqui conta como copiado
+_MIN_COPIED_CHARS = 4
 # A pessoa deixou os valores com a IA ("dados de exemplo", "escolha do seu jeito")
 _FREE_CHOICE = re.compile(
     r"\b(exemplos?|fict[ií]ci[oa]s?|qualquer|quaisquer|aleat[oó]ri[oa]s?|invente|inventar|"
@@ -125,6 +127,14 @@ def _host_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
+def _icon_only_button(element: PageElement) -> bool:
+    """Botão sem texto nem rótulo: a trava de palavras não tem o que ler, então ninguém sabe se
+    ele envia, apaga ou só abre um menu."""
+    is_button = element.role == "button" or element.input_type in {"submit", "button"}
+    named = element.text or element.label or element.name or element.placeholder
+    return is_button and not named.strip() and not element.in_menu
+
+
 def _name_of(element: PageElement) -> str:
     # O texto de uma lista é a opção que está escolhida agora, e não o nome dela
     if element.role in {"listbox", "combobox"} and element.label:
@@ -156,6 +166,8 @@ class AiExplorer:
         self.last_heartbeat = 0.0
         self.ai_questions = 0
         self.capture_reminded = False
+        # O texto da tela da última decisão: um valor tirado dele não veio da pessoa
+        self.last_screen_text = ""
 
     # ---------- banco ----------
 
@@ -170,9 +182,12 @@ class AiExplorer:
 
     def _check_open(self) -> None:
         self.session.refresh(self.draft)
+        # Fecha a transação da leitura: sem isto, cada rascunho esperando resposta segurava uma
+        # conexão do banco por até 10 minutos, e as outras contas ficavam sem conexão
+        self.session.commit()
         if self.draft.status not in OPEN_STATUSES:
             raise _Canceled
-        if time.monotonic() - self.last_heartbeat >= _HEARTBEAT_SECONDS:
+        if time.monotonic() - self.last_heartbeat >= HEARTBEAT_SECONDS:
             self._save()
 
     def _event_entry(self, kind: str, text: str) -> list[dict[str, Any]]:
@@ -285,7 +300,15 @@ class AiExplorer:
         """Valor que veio da pessoa, ou que ela deixou a IA escolher, não precisa de confirmação."""
         if self._mentioned(value):
             return True
+        if self._copied_from_screen(value):
+            # Um texto escondido na página pode "sugerir" o que digitar (injeção de prompt). Mesmo
+            # com "dados de exemplo", valor tirado da tela passa pela pessoa
+            return False
         return any(_FREE_CHOICE.search(_normalize(source)) for source in self._person_texts())
+
+    def _copied_from_screen(self, value: str) -> bool:
+        wanted = _normalize(value)
+        return len(wanted) >= _MIN_COPIED_CHARS and wanted in _normalize(self.last_screen_text)
 
     def _capture_names(self) -> set[str]:
         return {
@@ -366,7 +389,14 @@ class AiExplorer:
         value = (decision.valor or "").strip()
 
         if decision.acao == "clicar":
-            if looks_irreversible(f"{element.text} {element.label}"):
+            if _icon_only_button(element):
+                answer = self._ask(
+                    "Este botão não tem nome, só um ícone, e eu não sei o que ele faz. Posso clicar?",
+                    [YES_CLICK, NO_CLICK],
+                )
+                if not _same(answer, YES_CLICK):
+                    return "A pessoa não quis esse clique. Procure um botão com nome."
+            elif looks_irreversible(f"{element.text} {element.label} {element.name}"):
                 answer = self._ask(
                     f'O botão "{name}" pode não ter volta (pagar, enviar, excluir...). Posso clicar?',
                     [YES_CLICK, NO_CLICK],
@@ -734,11 +764,15 @@ class AiExplorer:
             elements=elements,
             options=options,
             screen_data=data,
-            screen_text=visible_text(page),
+            screen_text=self._remember_screen(visible_text(page)),
             spreadsheet=self._spreadsheet_frame(page) is not None,
             questions_left=_MAX_AI_QUESTIONS - self.ai_questions,
         )
         return self.llm.decide(payload), elements, data
+
+    def _remember_screen(self, text: str) -> str:
+        self.last_screen_text = text
+        return text
 
     def _loop(self, tabs: ItemTabs) -> None:
         last_result = "A página inicial acabou de abrir."

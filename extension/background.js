@@ -104,8 +104,24 @@ async function injetar(tabId, frameId) {
   }
 }
 
-async function iniciar(mensagem) {
+// A gravação só vai para uma API conhecida (config.js) ou da mesma origem do painel. Uma página
+// que se passasse pelo painel não consegue desviar a gravação para outro servidor.
+function apiPermitida(apiUrl, origemDoPainel) {
+  try {
+    const url = new URL(apiUrl)
+    if (!['http:', 'https:'].includes(url.protocol)) return false
+    const normalizada = url.href.replace(/\/$/, '')
+    return url.origin === origemDoPainel || API_URLS.some((permitida) => permitida.replace(/\/$/, '') === normalizada)
+  } catch {
+    return false
+  }
+}
+
+async function iniciar(mensagem, origemDoPainel) {
   if (await lerEstado()) return { ok: false, error: 'Já existe uma gravação em andamento. Termine ou descarte antes.' }
+  if (!apiPermitida(mensagem.apiUrl, origemDoPainel)) {
+    return { ok: false, error: 'O endereço da API do Ditto não é um dos aceitos pela extensão (veja config.js).' }
+  }
 
   let inicio
   try {
@@ -123,7 +139,8 @@ async function iniciar(mensagem) {
     name: mensagem.name,
     token: mensagem.token,
     apiUrl: mensagem.apiUrl,
-    panelUrl: mensagem.panelUrl,
+    // Ao salvar, a aba volta para o painel que pediu a gravação, nunca para um endereço informado pela página
+    panelUrl: origemDoPainel,
     startUrl: inicio.href,
     startedAt: Date.now(),
     tabIds: [aba.id],
@@ -401,15 +418,16 @@ function aoReceber(mensagem, remetente) {
   if (remetente.id !== chrome.runtime.id) return Promise.resolve({ ok: false })
 
   // O painel só fala pela ponte, que só existe nas origens do manifest
-  if (['ditto:ping', 'ditto:start', 'ditto:connect-runner'].includes(mensagem.type)) {
-    if (!origensDoPainel().includes(new URL(remetente.url).origin)) {
+  if (['ditto:ping', 'ditto:start', 'ditto:connect-runner', 'ditto:disconnect-runner'].includes(mensagem.type)) {
+    const origem = new URL(remetente.url).origin
+    if (!origensDoPainel().includes(origem)) {
       return Promise.resolve({ ok: false, error: 'Origem não autorizada.' })
     }
     if (mensagem.type === 'ditto:ping') {
       return enfileirar(async () => ({
         ok: true,
         version: chrome.runtime.getManifest().version,
-        runner: statusDoExecutor(),
+        runner: (await resumoDoExecutor()).runner,
         ...resumo(await lerEstado()),
       }))
     }
@@ -417,13 +435,31 @@ function aoReceber(mensagem, remetente) {
       if (typeof mensagem.token !== 'string' || !mensagem.token) {
         return Promise.resolve({ ok: false, error: 'Token do executor ausente.' })
       }
-      return salvarTokenDoExecutor(mensagem.token).then(() => ({ ok: true, runner: statusDoExecutor() }))
+      // Não liga sozinho: abre a janela da extensão para a pessoa confirmar a conta
+      return pedirLigacao(mensagem.token, mensagem.account).then((runner) => ({ ok: true, runner }))
     }
-    return enfileirar(() => iniciar(mensagem))
+    if (mensagem.type === 'ditto:disconnect-runner') {
+      return desligarExecutor().then(() => ({ ok: true, runner: statusDoExecutor() }))
+    }
+    return enfileirar(() => iniciar(mensagem, origem))
+  }
+
+  // Pedidos que só a janela da própria extensão pode fazer (nem o painel nem as páginas gravadas)
+  const daExtensao = remetente.url?.startsWith(chrome.runtime.getURL(''))
+  if (['ditto:runner-confirm', 'ditto:runner-cancel', 'ditto:runner-off'].includes(mensagem.type)) {
+    if (!daExtensao) return Promise.resolve({ ok: false, error: 'Origem não autorizada.' })
+    if (mensagem.type === 'ditto:runner-confirm') return confirmarLigacao().then((ok) => ({ ok }))
+    if (mensagem.type === 'ditto:runner-cancel') return recusarLigacao().then(() => ({ ok: true }))
+    return desligarExecutor().then(() => ({ ok: true }))
   }
 
   if (mensagem.type === 'ditto:status') {
-    return enfileirar(async () => ({ ...resumo(await lerEstado()), runner: statusDoExecutor() }))
+    return enfileirar(async () => {
+      const executor = await resumoDoExecutor()
+      // A conta ligada e o pedido pendente só aparecem para a janela da extensão
+      const detalhes = daExtensao ? executor : { runner: executor.runner }
+      return { ...resumo(await lerEstado()), ...detalhes }
+    })
   }
   if (mensagem.type === 'ditto:stop') return enfileirar(() => parar(remetente.tab?.id), LIMITE_DO_ENVIO_MS)
   if (mensagem.type === 'ditto:discard') return enfileirar(descartar)

@@ -9,6 +9,7 @@ from app.controllers.dependencies import (
     UNAUTHORIZED_RESPONSE,
     CurrentUser,
     DbSession,
+    TokenIssuedAt,
 )
 from app.core.exceptions import PayloadTooLargeError
 from app.core.rate_limit import limit_requests
@@ -88,15 +89,16 @@ def delete_avatar(user: CurrentUser, session: DbSession) -> UserResponse:
     summary="Trocar a senha",
     description=(
         "Troca a senha e encerra as outras sessões. Devolve um token novo para esta sessão continuar. "
-        "Em conta criada pelo Google, define a primeira senha."
+        "Em conta criada pelo Google, define a primeira senha: para isso o login precisa ser "
+        "recente (até 10 minutos), já que não há senha atual para confirmar quem é."
     ),
     responses={**RULE_RESPONSE, **_RATE_LIMIT_RESPONSE},
     dependencies=[Depends(limit_requests(10))],
 )
 def change_password(
-    payload: PasswordChange, user: CurrentUser, session: DbSession
+    payload: PasswordChange, user: CurrentUser, issued_at: TokenIssuedAt, session: DbSession
 ) -> TokenResponse:
-    return AccountService(session).change_password(user, payload)
+    return AccountService(session).change_password(user, payload, issued_at)
 
 
 @router.delete(
@@ -105,12 +107,16 @@ def change_password(
     summary="Excluir a conta",
     description=(
         "Apaga a conta e tudo o que é dela: tarefas, execuções, acessos, agendas e arquivos. "
-        "Não tem volta. Pede o e-mail da conta e, se houver, a senha."
+        "Não tem volta. Pede o e-mail da conta e, se houver, a senha. Sem senha (conta do "
+        "Google), o login precisa ser recente (até 10 minutos)."
     ),
     responses={**RULE_RESPONSE, **_RATE_LIMIT_RESPONSE},
     dependencies=[Depends(limit_requests(10))],
 )
 def delete_account(
-    payload: Annotated[AccountDeletion, Body()], user: CurrentUser, session: DbSession
+    payload: Annotated[AccountDeletion, Body()],
+    user: CurrentUser,
+    issued_at: TokenIssuedAt,
+    session: DbSession,
 ) -> None:
-    AccountService(session).delete(user, payload)
+    AccountService(session).delete(user, payload, issued_at)

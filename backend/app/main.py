@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.controllers.account_controller import router as account_router
 from app.controllers.ai_draft_controller import router as ai_draft_router
@@ -24,6 +25,73 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
 }
+# Só em produção, que roda em HTTPS: o navegador passa a recusar a versão sem cadeado
+_HSTS = "max-age=31536000; includeSubDomains"
+_TOO_LARGE = {"detail": "O envio passa do tamanho permitido.", "code": "PAYLOAD_TOO_LARGE"}
+
+
+class BodySizeLimit:
+    """Corta o pedido assim que o corpo passa do limite, mesmo sem Content-Length.
+
+    Conferir só o cabeçalho deixava passar envios em partes (Transfer-Encoding: chunked), que
+    eram lidos inteiros na memória antes de qualquer validação.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = dict(scope.get("headers") or []).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            await JSONResponse(status_code=413, content=_TOO_LARGE)(scope, receive, send)
+            return
+
+        received = 0
+        started = False
+        cut = False
+
+        async def limited_receive() -> Message:
+            nonlocal received, cut
+            if cut:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    # O FastAPI transforma qualquer erro na leitura do corpo em "400". Por isso a
+                    # resposta 413 sai daqui mesmo, e a rota recebe "cliente desconectou"
+                    cut = True
+                    if not started:
+                        await _send_too_large(send)
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal started
+            if cut:
+                # Já respondemos 413: o que a rota tentar mandar depois é descartado
+                return
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not cut:
+                raise
+
+
+async def _send_too_large(send: Send) -> None:
+    response = JSONResponse(status_code=413, content=_TOO_LARGE)
+    await send({"type": "http.response.start", "status": 413, "headers": response.raw_headers})
+    await send({"type": "http.response.body", "body": response.body})
+
 
 _OPENAPI_TAGS = [
     {"name": "Saúde", "description": "Verifica se a API e o banco respondem."},
@@ -60,18 +128,17 @@ def create_app(app_settings: Settings = settings) -> FastAPI:
     async def protect_responses(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > app_settings.max_body_bytes:
-            return JSONResponse(
-                status_code=413,
-                content={
-                    "detail": "O envio passa do tamanho permitido.",
-                    "code": "PAYLOAD_TOO_LARGE",
-                },
-            )
         response = await call_next(request)
         response.headers.update(_SECURITY_HEADERS)
+        # Respostas da API trazem dados da conta: nada de ficar guardado em cache do navegador
+        # ou de um proxy no caminho
+        response.headers.setdefault("Cache-Control", "no-store")
+        if not is_development:
+            response.headers["Strict-Transport-Security"] = _HSTS
         return response
+
+    # Por fora de tudo: corta o envio grande antes de qualquer leitura do corpo
+    app.add_middleware(BodySizeLimit, max_bytes=app_settings.max_body_bytes)
 
     app.add_middleware(
         CORSMiddleware,

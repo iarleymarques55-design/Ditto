@@ -9,6 +9,10 @@ from app.models.flow import Step
 from app.models.repair import HelpRequest, Repair
 from app.models.run import Run
 
+# Pedidos abertos mostrados de uma vez. Uma execução para no primeiro pedido, então passar disso
+# só acontece com muitas execuções paradas ao mesmo tempo
+MAX_OPEN_HELP = 100
+
 
 class RepairRepository:
     def __init__(self, session: Session) -> None:
@@ -41,8 +45,9 @@ class RepairRepository:
         return list(repairs), total
 
     def list_open_help(
-        self, owner_id: uuid.UUID, run_id: uuid.UUID | None = None
+        self, owner_id: uuid.UUID, run_id: uuid.UUID | None = None, limit: int = MAX_OPEN_HELP
     ) -> list[HelpRequest]:
+        """Os mais recentes primeiro, até `limit`: o painel consulta esta lista o tempo todo."""
         conditions = [HelpRequest.owner_id == owner_id, HelpRequest.status == HelpStatus.OPEN]
         if run_id:
             conditions.append(HelpRequest.run_id == run_id)
@@ -54,6 +59,7 @@ class RepairRepository:
                     joinedload(HelpRequest.run).joinedload(Run.flow), joinedload(HelpRequest.item)
                 )
                 .order_by(HelpRequest.created_at.desc())
+                .limit(limit)
             )
         )
 

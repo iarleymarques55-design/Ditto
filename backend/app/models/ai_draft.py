@@ -34,5 +34,7 @@ class AiDraft(IdTimestampMixin, Base):
     question: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     answer: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
-    flow_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("flows.id", ondelete="SET NULL"))
+    flow_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("flows.id", ondelete="SET NULL"), index=True
+    )
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

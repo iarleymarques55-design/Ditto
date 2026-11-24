@@ -34,6 +34,20 @@ def scrub(text: str, secrets: Iterable[str]) -> str:
     return cleaned
 
 
+# Dados pessoais que aparecem soltos na tela (CPF, CNPJ, cartão, conta) não ajudam a IA a navegar
+# e não precisam sair para o serviço externo
+_PERSONAL_NUMBERS = re.compile(
+    r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b"  # CPF
+    r"|\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b"  # CNPJ
+    r"|\b(?:\d[ -]?){13,19}\b"  # cartão
+    r"|\b\d{9,}\b"  # CPF sem pontos, conta, telefone, protocolo longo
+)
+
+
+def mask_personal_data(text: str) -> str:
+    return _PERSONAL_NUMBERS.sub("[número oculto]", text)
+
+
 def _short(text: str | None, secrets: list[str]) -> str:
     return scrub(text or "", secrets)[:MAX_TEXT]
 
@@ -152,7 +166,7 @@ def build_explorer_payload(
         "endereco_atual": _short(_page_address(url), protected),
         "titulo_da_pagina": _short(title, protected),
         # Sem o texto da tela a IA só vê botões e campos, e passa a supor o resultado de cada passo
-        "texto_da_tela": scrub(screen_text, protected)[:MAX_SCREEN_TEXT],
+        "texto_da_tela": mask_personal_data(scrub(screen_text, protected))[:MAX_SCREEN_TEXT],
         "planilha_excel_aberta": spreadsheet,
         "perguntas_restantes": questions_left,
         "passos_ja_feitos": [_short(item, protected) for item in done[-30:]],

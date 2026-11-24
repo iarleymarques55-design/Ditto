@@ -77,9 +77,7 @@ function SenhaConta() {
             {temSenha ? 'Trocar a senha' : 'Criar a senha'}
           </Botao>
           {salvo && (
-            <p role="status" className="text-[14px] font-medium text-ok-texto">
-              Senha salva.
-            </p>
+            <output className="block text-[14px] font-medium text-ok-texto">Senha salva.</output>
           )}
         </div>
         {erro && (

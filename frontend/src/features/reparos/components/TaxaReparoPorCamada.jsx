@@ -32,6 +32,7 @@ function TaxaReparoPorCamada({ resolvidos }) {
                   {rotulo}
                 </th>
                 <td className="py-2">
+                  <span className="sr-only">{PERCENTUAL.format(parte)}</span>
                   <span
                     aria-hidden="true"
                     className="block h-2.5 min-w-[3px] rounded-r-[4px] bg-ink"

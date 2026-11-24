@@ -63,9 +63,7 @@ function DadosConta() {
             Salvar nome
           </Botao>
           {salvo && (
-            <p role="status" className="text-[14px] font-medium text-ok-texto">
-              Nome salvo.
-            </p>
+            <output className="block text-[14px] font-medium text-ok-texto">Nome salvo.</output>
           )}
         </div>
         {erro && (

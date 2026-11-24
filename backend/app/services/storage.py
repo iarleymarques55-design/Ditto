@@ -59,6 +59,7 @@ def _file_chunks(path: Path) -> Iterator[bytes]:
 def _bucket_client() -> Any:
     # O boto3 só é carregado quando há bucket: no computador ele nem precisa estar em uso
     import boto3
+    from botocore.config import Config
 
     # Sessão própria: a sessão padrão do boto3 não é segura entre as linhas de trabalho do worker.
     # Se duas threads criarem o cliente ao mesmo tempo, cada uma fica com o seu, sem problema
@@ -68,6 +69,9 @@ def _bucket_client() -> Any:
         region_name=settings.s3_region,
         aws_access_key_id=settings.s3_access_key_id.get_secret_value(),
         aws_secret_access_key=settings.s3_secret_access_key.get_secret_value(),
+        # Um bucket lento não pode prender uma requisição da API nem uma linha do worker por
+        # minutos: o padrão do botocore é 60 s por tentativa, com até 4 tentativas
+        config=Config(connect_timeout=5, read_timeout=30, retries={"max_attempts": 3}),
     )
 
 

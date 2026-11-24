@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleError
@@ -11,6 +10,11 @@ from app.models.flow import Flow
 from app.models.run import Run, RunItem, RunLogEntry
 from app.repositories.credential_repository import CredentialRepository
 from app.repositories.repair_repository import RepairRepository
+from app.repositories.run_repository import RunRepository
+
+# De quanto em quanto tempo quem está rodando uma execução (ou um rascunho do Criar com IA)
+# avisa que continua vivo. Sem aviso por STALE_RUN_MINUTES, o trabalho volta para a fila.
+HEARTBEAT_SECONDS = 30
 
 _MAX_LABEL = 200
 _CONCLUDED = {ItemStatus.SUCCEEDED, ItemStatus.REPAIRED}
@@ -54,9 +58,7 @@ def create_run(
 
 
 def _items_of(session: Session, run: Run) -> list[RunItem]:
-    return list(
-        session.scalars(select(RunItem).where(RunItem.run_id == run.id).order_by(RunItem.position))
-    )
+    return RunRepository(session).items_of(run.id)
 
 
 def finalize(session: Session, run: Run) -> None:

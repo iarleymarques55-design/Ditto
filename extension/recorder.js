@@ -7,6 +7,11 @@
   const NO_TOPO = window === window.top
   const SENSIVEL_AUTOCOMPLETE = /password|cc-|one-time-code/i
   const SENSIVEL_NOME = /senha|password|passwd|pwd|cvv|cvc|card.?number|numero.?cartao|token|secret/i
+  // Siglas curtas só valem como palavra inteira: "pin" é senha, "spinner" não é
+  const SENSIVEL_SIGLA = /(^|[^a-z])(pin|otp|2fa|mfa|cvv|cvc|csc)([^a-z]|$)/i
+  // O que a pessoa lê na tela: rótulo, placeholder, aria-label
+  const SENSIVEL_ROTULO =
+    /senha|password|c[oó]digo (de )?(seguran[cç]a|verifica[cç][aã]o|acesso|confirma[cç][aã]o)|assinatura eletr[oô]nica|frase secreta|chave de seguran[cç]a|token|n[uú]mero do cart[aã]o/i
   const CLICAVEL =
     'a,button,summary,input[type=submit],input[type=button],input[type=reset],input[type=image],' +
     '[role=button],[role=link],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=tab],[role=option],' +
@@ -43,7 +48,11 @@
     if (el.type === 'password') return true
     const autocomplete = el.getAttribute?.('autocomplete') ?? ''
     if (SENSIVEL_AUTOCOMPLETE.test(autocomplete)) return true
-    return SENSIVEL_NOME.test(`${el.name ?? ''} ${el.id ?? ''}`)
+    const nomes = `${el.name ?? ''} ${el.id ?? ''}`
+    if (SENSIVEL_NOME.test(nomes) || SENSIVEL_SIGLA.test(nomes)) return true
+    // PIN, código do SMS e afins costumam vir em campo comum, sem nada no name: o rótulo entrega
+    const naTela = `${el.getAttribute?.('aria-label') ?? ''} ${el.getAttribute?.('placeholder') ?? ''} ${rotulo(el) ?? ''}`
+    return SENSIVEL_ROTULO.test(naTela) || SENSIVEL_SIGLA.test(naTela)
   }
 
   function papel(el) {

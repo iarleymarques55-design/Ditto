@@ -1,4 +1,7 @@
 import logging
+import threading
+import time
+from datetime import UTC, datetime
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
@@ -19,6 +22,7 @@ from app.core.security import (
     create_access_token,
     decode_access_token,
     hash_password,
+    issued_before,
     verify_password,
 )
 from app.models.user import User
@@ -33,15 +37,58 @@ from app.schemas.auth import (
 
 logger = logging.getLogger(__name__)
 
-_LOGIN_ATTEMPTS_PER_EMAIL = 10
+# Por e-mail e IP: quem erra a própria senha é travado sem travar a dona da conta em outro lugar
+_LOGIN_ATTEMPTS_PER_EMAIL_AND_IP = 10
+# Por e-mail, de qualquer lugar: freia ataque distribuído. Alto o bastante para que travar a
+# conta de outra pessoa custe muitas tentativas de muitos IPs
+_LOGIN_ATTEMPTS_PER_EMAIL = 50
 _LOGIN_WINDOW_SECONDS = 15 * 60
 _GOOGLE_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 
 
+# Os certificados do Google mudam poucas vezes por dia: buscar a cada login deixava cada
+# entrada mais lenta e, com o Google fora do ar, presa por até 2 minutos
+_GOOGLE_TIMEOUT_SECONDS = 10
+_GOOGLE_CERTS_CACHE_SECONDS = 60 * 60
+
+
+class _CachedGoogleRequest(google_requests.Request):
+    """Transporte do google-auth com tempo limite curto e cache das respostas GET."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cache: dict[str, tuple[float, object]] = {}
+        self._lock = threading.Lock()
+
+    def __call__(
+        self,
+        url: str,
+        method: str = "GET",
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+        **kwargs: object,
+    ) -> object:
+        timeout = min(timeout or _GOOGLE_TIMEOUT_SECONDS, _GOOGLE_TIMEOUT_SECONDS)
+        if method != "GET" or body is not None:
+            return super().__call__(url, method, body, headers, timeout, **kwargs)
+        now = time.monotonic()
+        with self._lock:
+            cached = self._cache.get(url)
+            if cached and now - cached[0] < _GOOGLE_CERTS_CACHE_SECONDS:
+                return cached[1]
+        response = super().__call__(url, method, body, headers, timeout, **kwargs)
+        if response.status == 200:
+            with self._lock:
+                self._cache[url] = (now, response)
+        return response
+
+
+_google_request = _CachedGoogleRequest()
+
+
 def _verify_google_token(credential: str) -> dict:
-    return id_token.verify_oauth2_token(
-        credential, google_requests.Request(), settings.google_client_id
-    )
+    return id_token.verify_oauth2_token(credential, _google_request, settings.google_client_id)
 
 
 def token_for(user: User) -> TokenResponse:
@@ -75,9 +122,12 @@ class AuthService:
             raise ConflictError("Já existe uma conta com este e-mail.") from error
         return token_for(user)
 
-    def login(self, payload: LoginRequest) -> TokenResponse:
+    def login(self, payload: LoginRequest, client: str = "desconhecido") -> TokenResponse:
         email = payload.email.lower()
-        # Conta por e-mail, além do limite por IP da rota: protege a conta de ataques distribuídos
+        # Além do limite por IP da rota
+        rate_limiter.check(
+            f"login:{email}:{client}", _LOGIN_ATTEMPTS_PER_EMAIL_AND_IP, _LOGIN_WINDOW_SECONDS
+        )
         rate_limiter.check(f"login:{email}", _LOGIN_ATTEMPTS_PER_EMAIL, _LOGIN_WINDOW_SECONDS)
 
         user = self.users.get_by_email(email)
@@ -114,6 +164,9 @@ class AuthService:
             # antes com o e-mail de outra pessoa continuaria entrando depois que ela usasse o Google.
             user.password_hash = None
             user.google_sub = claims["sub"]
+            # E os tokens que essa pessoa já tinha tirado (o de acesso e o do executor, que dura
+            # 30 dias) também deixam de valer: sem isto ela continuaria ligada à conta
+            user.tokens_valid_after = datetime.now(UTC)
             return user
 
         return self.users.add(
@@ -122,10 +175,19 @@ class AuthService:
 
     def get_runner_user(self, token: str) -> User:
         """Só o token do executor liga a extensão ao worker, nem o token de acesso comum."""
-        _, _, scope = decode_access_token(token)
+        _, issued_at, scope = decode_access_token(token)
         if scope != RUNNER_SCOPE:
             raise UnauthorizedError
-        return self.get_user_from_token(token, allowed_scope=RUNNER_SCOPE)
+        user = self.get_user_from_token(token, allowed_scope=RUNNER_SCOPE)
+        # "Desligar este Chrome" no painel ou na extensão
+        if issued_before(issued_at, user.runner_tokens_valid_after):
+            raise UnauthorizedError
+        return user
+
+    def revoke_runner_tokens(self, user: User) -> None:
+        """Encerra todos os Chromes ligados a esta conta. O relé derruba a conexão em até 1 min."""
+        user.runner_tokens_valid_after = datetime.now(UTC)
+        self.session.commit()
 
     def get_user_from_token(self, token: str, *, allowed_scope: str | None = None) -> User:
         user_id, issued_at, scope = decode_access_token(token)
@@ -136,6 +198,6 @@ class AuthService:
         if user is None:
             raise UnauthorizedError
         # A senha foi trocada depois que este token saiu: a sessão antiga acabou
-        if user.tokens_valid_after and issued_at < int(user.tokens_valid_after.timestamp()):
+        if issued_before(issued_at, user.tokens_valid_after):
             raise UnauthorizedError
         return user

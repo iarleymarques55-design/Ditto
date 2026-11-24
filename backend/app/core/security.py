@@ -26,22 +26,36 @@ def verify_password(password: str, password_hash: str | None) -> bool:
     return bcrypt.checkpw(candidate, password_hash.encode())
 
 
+def _issued_at_ms(now: datetime) -> int:
+    return int(now.timestamp() * 1000)
+
+
 def create_access_token(user_id: uuid.UUID) -> str:
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "iat": now,
+        # O "iat" do JWT só guarda segundos: um token emitido no mesmo segundo em que a senha
+        # foi trocada escaparia da revogação. Os milissegundos tiram essa folga
+        "iat_ms": _issued_at_ms(now),
         "exp": now + timedelta(minutes=settings.jwt_expires_minutes),
     }
     return jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
 
 
 def _create_scoped_token(
-    user_id: uuid.UUID, scope: str, lifetime: timedelta
+    user_id: uuid.UUID, scope: str, lifetime: timedelta, extra: dict | None = None
 ) -> tuple[str, datetime]:
     now = datetime.now(UTC)
     expires_at = now + lifetime
-    payload = {"sub": str(user_id), "iat": now, "exp": expires_at, "scope": scope}
+    payload = {
+        "sub": str(user_id),
+        "iat": now,
+        "iat_ms": _issued_at_ms(now),
+        "exp": expires_at,
+        "scope": scope,
+        **(extra or {}),
+    }
     token = jwt.encode(payload, settings.jwt_secret.get_secret_value(), algorithm=ALGORITHM)
     return token, expires_at
 
@@ -53,14 +67,20 @@ def create_recording_token(user_id: uuid.UUID) -> tuple[str, datetime]:
     )
 
 
-def create_runner_token(user_id: uuid.UUID) -> tuple[str, datetime]:
+def create_runner_token(user_id: uuid.UUID, email: str) -> tuple[str, datetime]:
     """Token que liga a extensão ao worker, para as tarefas rodarem no Chrome da pessoa.
-    Não vale em nenhuma rota da API."""
-    return _create_scoped_token(user_id, RUNNER_SCOPE, timedelta(days=settings.runner_token_days))
+    Não vale em nenhuma rota da API.
+
+    Leva o e-mail da conta: a extensão mostra esse e-mail antes de a pessoa aceitar a ligação.
+    Como o token é assinado, uma página que trocasse o e-mail teria o token recusado pelo relé.
+    """
+    return _create_scoped_token(
+        user_id, RUNNER_SCOPE, timedelta(days=settings.runner_token_days), {"email": email}
+    )
 
 
 def decode_access_token(token: str) -> tuple[uuid.UUID, int, str | None]:
-    """Devolve a conta, o instante em que o token foi emitido e o escopo, se houver."""
+    """Devolve a conta, o instante de emissão (em milissegundos) e o escopo, se houver."""
     try:
         payload = jwt.decode(
             token,
@@ -68,10 +88,15 @@ def decode_access_token(token: str) -> tuple[uuid.UUID, int, str | None]:
             algorithms=[ALGORITHM],
             options={"require": ["exp", "iat", "sub"]},
         )
-        return (
-            uuid.UUID(payload["sub"]),
-            int(payload["iat"]),
-            payload.get("scope"),
-        )
+        # Tokens antigos, sem "iat_ms", contam como emitidos no começo do segundo
+        issued_at_ms = payload.get("iat_ms")
+        if not isinstance(issued_at_ms, int):
+            issued_at_ms = int(payload["iat"]) * 1000
+        return (uuid.UUID(payload["sub"]), issued_at_ms, payload.get("scope"))
     except (jwt.PyJWTError, ValueError, TypeError) as error:
         raise UnauthorizedError from error
+
+
+def issued_before(issued_at_ms: int, moment: datetime | None) -> bool:
+    """O token saiu antes de `moment` e por isso deixou de valer?"""
+    return moment is not None and issued_at_ms < _issued_at_ms(moment)

@@ -1,5 +1,6 @@
 """Converte registros do banco nas respostas da API."""
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -9,7 +10,7 @@ from app.models.flow import Flow, Step, StepVersion
 from app.models.repair import HelpRequest, Repair
 from app.models.run import Run, RunItem, RunLogEntry
 from app.models.schedule import Schedule
-from app.repositories.run_repository import RunCounts
+from app.repositories.run_repository import OutputSummary, RunCounts
 from app.schemas.flow import StepResponse
 from app.schemas.repair import HelpOption, HelpRequestResponse, RepairResponse
 from app.schemas.run import RunCapture, RunDetail, RunItemResponse, RunLogLine, RunStep, RunSummary
@@ -109,10 +110,11 @@ def run_summary(run: Run, counts: RunCounts | None) -> RunSummary:
     )
 
 
-def _item_response(item: RunItem) -> RunItemResponse:
-    # Tabelas podem ser grandes e a tela consulta esta resposta o tempo todo: aqui só a contagem
-    values = {k: v for k, v in (item.output or {}).items() if isinstance(v, str)}
-    tables = {k: len(v) for k, v in (item.output or {}).items() if isinstance(v, list)}
+def _item_response(item: RunItem, summary: OutputSummary | None) -> RunItemResponse:
+    # Tabelas podem ser grandes e a tela consulta esta resposta o tempo todo: aqui só a contagem,
+    # que vem pronta do banco (RunRepository.output_summaries)
+    values = summary.values if summary else {}
+    tables = summary.table_rows if summary else {}
     file = next((a for a in reversed(item.artifacts) if a.kind == ArtifactKind.FILE), None)
     screenshot = next(
         (a for a in reversed(item.artifacts) if a.kind == ArtifactKind.SCREENSHOT), None
@@ -134,7 +136,12 @@ def _item_response(item: RunItem) -> RunItemResponse:
     )
 
 
-def run_detail(run: Run, counts: RunCounts | None, log: list[RunLogEntry]) -> RunDetail:
+def run_detail(
+    run: Run,
+    counts: RunCounts | None,
+    log: list[RunLogEntry],
+    outputs: dict[uuid.UUID, OutputSummary],
+) -> RunDetail:
     return RunDetail(
         **run_summary(run, counts).model_dump(),
         portal=portal_of(run.flow),
@@ -152,7 +159,7 @@ def run_detail(run: Run, counts: RunCounts | None, log: list[RunLogEntry]) -> Ru
             for step in run.flow.steps
             if step.capture_key
         ],
-        items=[_item_response(item) for item in run.items],
+        items=[_item_response(item, outputs.get(item.id)) for item in run.items],
         log=[RunLogLine.model_validate(entry) for entry in log],
         steps=[RunStep(position=step.position, intent=step.intent) for step in run.flow.steps],
     )

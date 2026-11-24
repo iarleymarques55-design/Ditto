@@ -35,7 +35,10 @@ class DashboardService:
         if highlight is not None:
             highlight_counts = self.runs.counts_for([highlight.id]).get(highlight.id)
             highlight_detail = presenters.run_detail(
-                highlight, highlight_counts, self.runs.latest_log(highlight.id)
+                highlight,
+                highlight_counts,
+                self.runs.latest_log(highlight.id),
+                self.runs.output_summaries(highlight.id),
             )
 
         return DashboardSummary(

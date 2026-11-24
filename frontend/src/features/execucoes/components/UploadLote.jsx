@@ -51,7 +51,9 @@ function UploadLote({ colunas, aoCarregar }) {
 
   return (
     <div>
-      <label
+      {/* Soltar o arquivo é um atalho do mouse: pelo teclado, o campo de arquivo faz o mesmo */}
+      <div
+        role="presentation"
         onDragOver={(evento) => {
           evento.preventDefault()
           setArrastando(true)
@@ -63,29 +65,32 @@ function UploadLote({ colunas, aoCarregar }) {
           const [arquivo] = evento.dataTransfer.files
           if (arquivo) lerArquivo(arquivo)
         }}
-        className={`flex cursor-pointer flex-wrap items-center gap-4 rounded-[2px] border-[1.5px] border-dashed p-5 focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink ${
-          arrastando ? 'border-ink bg-tinta-clara' : 'border-tinta-media hover:border-ink hover:bg-card-soft'
-        }`}
       >
-        <FileSpreadsheet aria-hidden="true" className="size-8 shrink-0 text-ink" />
-        <span className="min-w-[200px] flex-1">
-          <span className="block text-[15px] font-medium text-navy">Escolha o arquivo ou solte aqui</span>
-          <span id={idDica} className="mt-0.5 block text-[14px]">
-            CSV ou Excel com {colunas.length === 1 ? 'a coluna' : 'as colunas'} {colunas.join(', ')}, até {LIMITE_LINHAS} linhas
+        <label
+          className={`flex cursor-pointer flex-wrap items-center gap-4 rounded-[2px] border-[1.5px] border-dashed p-5 focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ink ${
+            arrastando ? 'border-ink bg-tinta-clara' : 'border-tinta-media hover:border-ink hover:bg-card-soft'
+          }`}
+        >
+          <FileSpreadsheet aria-hidden="true" className="size-8 shrink-0 text-ink" />
+          <span className="min-w-[200px] flex-1">
+            <span className="block text-[15px] font-medium text-navy">Escolha o arquivo ou solte aqui</span>
+            <span id={idDica} className="mt-0.5 block text-[14px]">
+              CSV ou Excel com {colunas.length === 1 ? 'a coluna' : 'as colunas'} {colunas.join(', ')}, até {LIMITE_LINHAS} linhas
+            </span>
           </span>
-        </span>
-        <input
-          type="file"
-          accept=".csv,.xlsx,.xlsm"
-          aria-describedby={idDica}
-          className="sr-only"
-          onChange={(evento) => {
-            const [arquivo] = evento.target.files
-            if (arquivo) lerArquivo(arquivo)
-            evento.target.value = ''
-          }}
-        />
-      </label>
+          <input
+            type="file"
+            accept=".csv,.xlsx,.xlsm"
+            aria-describedby={idDica}
+            className="sr-only"
+            onChange={(evento) => {
+              const [arquivo] = evento.target.files
+              if (arquivo) lerArquivo(arquivo)
+              evento.target.value = ''
+            }}
+          />
+        </label>
+      </div>
 
       {erro && (
         <p role="alert" className="mt-2.5 text-[14.5px] font-medium text-rec-texto">

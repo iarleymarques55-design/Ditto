@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _IDLE_TIMEOUT_SECONDS = 60
 _CONNECT_TIMEOUT_SECONDS = 10
 _BUFFER_BYTES = 64 * 1024
+_MAX_LINE_BYTES = 8 * 1024
 _HOP_BY_HOP = {"proxy-connection", "proxy-authorization", "connection", "keep-alive"}
 
 Policy = Callable[[str, str], bool]
@@ -135,7 +136,52 @@ class _Handler(BaseHTTPRequestHandler):
         )
         with upstream:
             upstream.sendall(request.encode("latin-1", errors="replace"))
+            # O corpo (de um POST, por exemplo) começa no mesmo pacote dos cabeçalhos e já está
+            # no buffer de leitura: vai antes de ligar os dois lados direto
+            self._forward_body(upstream)
             _relay(self.connection, upstream)
+
+    def _forward_body(self, upstream: socket.socket) -> None:
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            self._forward_chunked(upstream)
+            return
+        try:
+            remaining = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return  # tamanho inválido: o destino recebe só os cabeçalhos e decide
+        while remaining > 0:
+            data = self.rfile.read(min(remaining, _BUFFER_BYTES))
+            if not data:
+                return
+            upstream.sendall(data)
+            remaining -= len(data)
+
+    def _forward_chunked(self, upstream: socket.socket) -> None:
+        """Repassa os pedaços como chegaram, até o pedaço vazio e os cabeçalhos finais."""
+        while True:
+            size_line = self.rfile.readline(_MAX_LINE_BYTES)
+            if not size_line:
+                return
+            upstream.sendall(size_line)
+            try:
+                size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+            except ValueError:
+                return
+            if size == 0:
+                while True:
+                    trailer = self.rfile.readline(_MAX_LINE_BYTES)
+                    if not trailer:
+                        return
+                    upstream.sendall(trailer)
+                    if trailer in {b"\r\n", b"\n"}:
+                        return
+            remaining = size + 2  # o pedaço e o \r\n que fecha
+            while remaining > 0:
+                data = self.rfile.read(min(remaining, _BUFFER_BYTES))
+                if not data:
+                    return
+                upstream.sendall(data)
+                remaining -= len(data)
 
     do_GET = _forward_http
     do_POST = _forward_http
@@ -161,8 +207,15 @@ class EgressProxy:
         handler = type("EgressHandler", (_Handler,), {"policy": staticmethod(policy)})
         self._server = _ProxyServer(("127.0.0.1", 0), handler)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._stop_lock = threading.Lock()
+        self.stopped = False
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     def stop(self) -> None:
+        """Pode ser chamado mais de uma vez: o navegador avisa que fechou e quem o abriu também."""
+        with self._stop_lock:
+            if self.stopped:
+                return
+            self.stopped = True
         self._server.shutdown()
         self._server.server_close()

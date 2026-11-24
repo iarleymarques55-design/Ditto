@@ -63,15 +63,21 @@ class RunService:
         self.flows = FlowRepository(session)
         self.repairs = RepairRepository(session)
 
-    def _get(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> Run:
-        run = self.runs.get_owned(run_id, owner_id)
+    def _get(self, run_id: uuid.UUID, owner_id: uuid.UUID, *, with_output: bool = True) -> Run:
+        run = self.runs.get_owned(run_id, owner_id, with_output=with_output)
         if run is None:
             raise NotFoundError("Esta execução não foi encontrada.")
         return run
 
+    def _light(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> Run:
+        """Para a tela: sem trazer as tabelas capturadas de todas as linhas."""
+        return self._get(run_id, owner_id, with_output=False)
+
     def _detail(self, run: Run) -> RunDetail:
         counts = self.runs.counts_for([run.id]).get(run.id)
-        return presenters.run_detail(run, counts, self.runs.latest_log(run.id))
+        return presenters.run_detail(
+            run, counts, self.runs.latest_log(run.id), self.runs.output_summaries(run.id)
+        )
 
     def create(
         self,
@@ -92,7 +98,7 @@ class RunService:
             self.session, flow, rows, trigger=RunTrigger.MANUAL, timezone=timezone
         )
         self.session.commit()
-        return self._detail(self._get(run.id, owner_id))
+        return self._detail(self._light(run.id, owner_id))
 
     def list(
         self,
@@ -110,10 +116,15 @@ class RunService:
         return Page(items=items, total=total, limit=limit, offset=offset)
 
     def get(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> RunDetail:
-        return self._detail(self._get(run_id, owner_id))
+        return self._detail(self._light(run_id, owner_id))
 
     def cancel(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> RunDetail:
-        run = self._get(run_id, owner_id)
+        run = self._light(run_id, owner_id)
+        # Trava a execução e lê o status de novo: se o worker estiver gravando o resultado de
+        # uma linha, o cancelamento espera ele terminar, e o worker vê o cancelamento antes de
+        # gravar o próximo (run_processor._lock_running)
+        self.runs.lock_status(run.id)
+        self.session.refresh(run)
         if run.status in _FINISHED:
             raise ConflictError("Esta execução já terminou.")
 
@@ -126,7 +137,7 @@ class RunService:
         run_lifecycle.add_log(self.session, run, LogLevel.INFO, "execução cancelada")
         self.session.commit()
         self.session.refresh(run)
-        return self._detail(self._get(run_id, owner_id))
+        return self._detail(self._light(run_id, owner_id))
 
     def report_pdf(self, run_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[str, bytes]:
         run = self._get(run_id, owner_id)

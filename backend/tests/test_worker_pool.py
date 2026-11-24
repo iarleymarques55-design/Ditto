@@ -57,7 +57,9 @@ class Fila:
         self.presas: dict[Any, threading.Event] = {}
         self.falhas_de_ligacao: set[Any] = set()
 
-    def rodar(self, _fabrica: Any, navegador: NavegadorFalso, owner_id: Any = None) -> bool:
+    def rodar(
+        self, _fabrica: Any, navegador: NavegadorFalso, owner_id: Any = None, **_extras: Any
+    ) -> bool:
         self.atendidas.append(owner_id)
         if owner_id in self.presas:
             # Uma execução de 500 linhas, ou o Criar com IA esperando a resposta da pessoa
