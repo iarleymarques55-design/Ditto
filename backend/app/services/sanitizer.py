@@ -5,11 +5,15 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from app.core.config import settings
 from app.services.engine.snapshot import PageElement
 
 MAX_ELEMENTS = 150
 MAX_TEXT = 120
 MAX_SCREEN_TEXT = 1500
+# O mínimo que ainda deixa a IA navegar quando a tela é enorme
+_MIN_ELEMENTS = 40
+_MIN_SCREEN_TEXT = 600
 _MIN_SECRET_LENGTH = 3
 
 
@@ -127,7 +131,7 @@ def _page_address(url: str) -> str:
 _FIELD_ROLES = {"textbox", "searchbox", "combobox", "listbox", "checkbox", "radio", "switch"}
 
 
-def _most_useful(elements: list[PageElement]) -> list[PageElement]:
+def _most_useful(elements: list[PageElement], limit: int = MAX_ELEMENTS) -> list[PageElement]:
     """Num site com barra lateral cheia de links (como o histórico de um chat), cortar pela ordem
     da página deixava a caixa de texto de fora, e a IA perguntava à pessoa onde ela estava.
     Campos vêm primeiro, depois o conteúdo, e por último menus e barras laterais."""
@@ -137,7 +141,7 @@ def _most_useful(elements: list[PageElement]) -> list[PageElement]:
             return 0
         return 2 if element.in_menu else 1
 
-    chosen = sorted(elements, key=rank)[:MAX_ELEMENTS]
+    chosen = sorted(elements, key=rank)[:limit]
     return sorted(chosen, key=lambda element: element.index)
 
 
@@ -159,8 +163,63 @@ def build_explorer_payload(
     questions_left: int = 0,
     secrets: Iterable[str] = (),
 ) -> str:
-    """Monta o pedido da IA que cria tarefas. O valor dos campos nunca é coletado (snapshot.py)."""
+    """Monta o pedido da IA que cria tarefas. O valor dos campos nunca é coletado (snapshot.py).
+
+    O pacote tem teto (LLM_MAX_PAYLOAD_CHARS): numa página enorme, como o Google Agenda, saem
+    primeiro os elementos menos úteis (menus, depois conteúdo; campos por último), depois os
+    dados da tela e por fim parte do texto da tela."""
     protected = _usable(secrets)
+    budget = settings.llm_max_payload_chars
+    limit, data_limit, text_limit = MAX_ELEMENTS, len(screen_data), MAX_SCREEN_TEXT
+    while True:
+        payload = _explorer_json(
+            prompt=prompt,
+            url=url,
+            title=title,
+            done=done,
+            last_result=last_result,
+            answers=answers,
+            captured=captured,
+            steps_left=steps_left,
+            elements=_most_useful(elements, limit),
+            options=options,
+            screen_data=screen_data[:data_limit],
+            screen_text=screen_text[:text_limit],
+            spreadsheet=spreadsheet,
+            questions_left=questions_left,
+            protected=protected,
+        )
+        if len(payload) <= budget:
+            return _assert_clean(payload, protected)
+        if limit > _MIN_ELEMENTS:
+            limit = max(_MIN_ELEMENTS, int(limit * 0.75))
+        elif data_limit > 0:
+            data_limit = data_limit // 2
+        elif text_limit > _MIN_SCREEN_TEXT:
+            text_limit = _MIN_SCREEN_TEXT
+        else:
+            # O mínimo útil já passa do teto: manda assim mesmo e a IA diz se não couber
+            return _assert_clean(payload, protected)
+
+
+def _explorer_json(
+    *,
+    prompt: str,
+    url: str,
+    title: str,
+    done: list[str],
+    last_result: str,
+    answers: list[dict[str, str]],
+    captured: list[str],
+    steps_left: int,
+    elements: list[PageElement],
+    options: dict[int, list[str]],
+    screen_data: list[Any],
+    screen_text: str,
+    spreadsheet: bool,
+    questions_left: int,
+    protected: list[str],
+) -> str:
     data = {
         "pedido_da_pessoa": scrub(prompt, protected)[:2000],
         "endereco_atual": _short(_page_address(url), protected),
@@ -197,7 +256,7 @@ def build_explorer_payload(
                     else {}
                 ),
             }
-            for element in _most_useful(elements)
+            for element in elements
         ],
         "dados_na_tela": [
             (
@@ -219,4 +278,4 @@ def build_explorer_payload(
             for item in screen_data
         ],
     }
-    return _assert_clean(json.dumps(data, ensure_ascii=False), protected)
+    return json.dumps(data, ensure_ascii=False)

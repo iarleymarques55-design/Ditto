@@ -117,3 +117,31 @@ def test_log_de_erro_nao_traz_o_conteudo_enviado(
     assert "dado-sigiloso" not in caplog.text
     assert "chave-de-teste" not in caplog.text
     assert "400" in caplog.text
+
+
+def test_log_mostra_o_tipo_do_erro_sem_a_mensagem(
+    esperas: list[float], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    erro = {
+        "error": {
+            "message": "The model `x` does not exist. Conteúdo: dado-sigiloso",
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+        }
+    }
+    responder_com(monkeypatch, [resposta(404, erro)])
+    with pytest.raises(LlmUnavailableError):
+        LlmClient().chat_json("s", "u")
+    assert "HTTP 404" in caplog.text
+    assert "invalid_request_error / model_not_found" in caplog.text
+    assert "dado-sigiloso" not in caplog.text
+
+
+def test_ia_nao_configurada_avisa_no_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Antes, o painel dizia "a IA não respondeu" e o log do worker ficava vazio
+    monkeypatch.setattr(llm_client.settings, "llm_api_key", None)
+    with pytest.raises(LlmUnavailableError):
+        LlmClient().chat_json("s", "u")
+    assert "LLM_API_KEY" in caplog.text
