@@ -46,7 +46,6 @@ from app.services.templating import slugify
 
 logger = logging.getLogger(__name__)
 
-_LOAD_WAIT_MS = 3000
 _POLL_MS = 150
 _QUIET_SECONDS = 0.5
 _SETTLE_MAX_SECONDS = 4
@@ -241,21 +240,9 @@ class AiExplorer:
 
     def _settle(self, page: Page) -> None:
         """Espera a página parar de mudar. Uma animação sem fim só custa o tempo máximo."""
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=_LOAD_WAIT_MS)
-            deadline = time.monotonic() + _SETTLE_MAX_SECONDS
-            state = postcondition.capture_state(page).fingerprint
-            quiet_since = time.monotonic()
-            while time.monotonic() < deadline:
-                page.wait_for_timeout(_POLL_MS)
-                current = postcondition.capture_state(page).fingerprint
-                if current != state:
-                    state = current
-                    quiet_since = time.monotonic()
-                elif time.monotonic() - quiet_since >= _QUIET_SECONDS:
-                    return
-        except PlaywrightError:
-            pass
+        postcondition.wait_until_quiet(
+            page, quiet_seconds=_QUIET_SECONDS, max_seconds=_SETTLE_MAX_SECONDS
+        )
 
     def _fingerprint(self, page: Page) -> str:
         try:

@@ -1,8 +1,10 @@
 """Executa um passo subindo a escada de reparo, da opção mais barata para a mais cara."""
 
+import functools
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -140,6 +142,22 @@ class StepOutcome:
     diagnostics: dict[str, Any] | None = None
 
 
+# Fases cronometradas de cada passo, para achar onde a execução perde tempo (log do worker)
+PHASES = ("locate", "act", "settle", "check")
+
+
+def _timed(phase: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorate(method: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(method)
+        def wrapper(self: "StepRunner", *args: Any, **kwargs: Any) -> Any:
+            with self.timing(phase):
+                return method(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
 class StepRunner:
     def __init__(
         self,
@@ -159,6 +177,10 @@ class StepRunner:
         # Pedidos em andamento: o site ainda pode estar buscando o que vai mostrar
         self._pending_requests: set[Request] = set()
         self._last_action: StepAction | None = None
+        # Segundos gastos em cada fase do passo atual. Só a fase de fora conta: uma espera dentro
+        # de um clique entra no clique, sem contar duas vezes
+        self.timings: dict[str, float] = {}
+        self._phase: str | None = None
         # Escuta a aba e as que ela abrir, nunca o navegador todo: no Chrome da pessoa,
         # as outras abas dela não podem segurar o passo nem virar download
         self._watch(page)
@@ -177,7 +199,21 @@ class StepRunner:
         page.on("download", lambda download: self.downloads.append(download))
         page.on("popup", self._watch)
 
+    @contextmanager
+    def timing(self, phase: str) -> Iterator[None]:
+        if self._phase is not None:
+            yield
+            return
+        self._phase = phase
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.timings[phase] = self.timings.get(phase, 0.0) + time.monotonic() - started
+            self._phase = None
+
     def run(self, plan: StepPlan) -> StepOutcome:
+        self.timings = {}
         after_capture = self._last_action == StepAction.CAPTURE
         self._last_action = plan.action
         if plan.action == StepAction.NAVIGATE:
@@ -315,7 +351,7 @@ class StepRunner:
                 message="Este endereço não está entre os domínios permitidos desta tarefa.",
             )
 
-        before = postcondition.capture_state(self.page)
+        before = self._state_before(plan)
         try:
             self.page.goto(plan.url, wait_until="domcontentloaded")
         except PlaywrightError:
@@ -480,6 +516,7 @@ class StepRunner:
             message=f"Não encontrei como fazer este passo nesta página: {plan.intent}.",
         )
 
+    @_timed("locate")
     def _locate_with_prelude(self, target: dict[str, Any]) -> Locator | None:
         for step_before in target.get("prelude", []):
             element = layer_one.locate(self.page, step_before)
@@ -500,24 +537,17 @@ class StepRunner:
         except PlaywrightError:
             return False
 
+    @_timed("settle")
     def _settle(self) -> None:
-        """Espera a página parar de mudar. Um site com animação sem fim só custa o tempo máximo."""
-        try:
-            self.page.wait_for_load_state("domcontentloaded", timeout=_LOAD_WAIT_MS)
-            deadline = time.monotonic() + _SETTLE_MAX_SECONDS
-            state = postcondition.capture_state(self.page).fingerprint
-            quiet_since = time.monotonic()
-            while time.monotonic() < deadline:
-                self.page.wait_for_timeout(_POLL_MS)
-                current = postcondition.capture_state(self.page).fingerprint
-                if current != state or self._pending_requests:
-                    state = current
-                    quiet_since = time.monotonic()
-                elif time.monotonic() - quiet_since >= _QUIET_SECONDS:
-                    return
-        except PlaywrightError:
-            pass  # a pós-condição é quem decide se o passo deu certo
+        """A pós-condição é quem decide se o passo deu certo: aqui só se decide quanto esperar."""
+        postcondition.wait_until_quiet(
+            self.page,
+            busy=lambda: bool(self._pending_requests),
+            quiet_seconds=_QUIET_SECONDS,
+            max_seconds=_SETTLE_MAX_SECONDS,
+        )
 
+    @_timed("act")
     def _act(self, element: Locator, plan: StepPlan) -> None:
         if plan.action == StepAction.CLICK:
             element.click()
@@ -633,26 +663,37 @@ class StepRunner:
                 frames.append({"url": frame.url[:200], "erro": "não deu para ler"})
         return {"frames": frames}
 
+    def _state_before(self, plan: StepPlan) -> postcondition.PageState:
+        """A foto da página antes do passo só serve à regra "a página mudou": tirar nas outras
+        custaria uma ida e volta ao Chrome por quadro, à toa."""
+        if plan.postcondition.get("type") != postcondition.PAGE_CHANGED:
+            return postcondition.PageState("")
+        with self.timing("check"):
+            return postcondition.capture_state(self.page)
+
     def _perform(self, element: Locator, plan: StepPlan) -> tuple[bool, Download | None]:
-        before = postcondition.capture_state(self.page)
+        before = self._state_before(plan)
         if plan.irreversible:
             self.before_irreversible()
         try:
-            if plan.postcondition.get("type") == postcondition.DOWNLOAD:
+            kind = plan.postcondition.get("type")
+            if kind == postcondition.DOWNLOAD:
                 return self._perform_download(element, plan)
 
-            filled = element.element_handle()
+            # Só a regra "o campo ficou com o valor" confere o próprio elemento preenchido
+            filled = element.element_handle() if kind == postcondition.FIELD_VALUE else None
             self._act(element, plan)
             self._settle()
-            passed = postcondition.check(
-                self.page,
-                plan.postcondition,
-                action=plan.action,
-                locator=element,
-                value=plan.value,
-                before=before,
-                filled=filled,
-            )
+            with self.timing("check"):
+                passed = postcondition.check(
+                    self.page,
+                    plan.postcondition,
+                    action=plan.action,
+                    locator=element,
+                    value=plan.value,
+                    before=before,
+                    filled=filled,
+                )
             return passed, None
         except PlaywrightError:
             return False, None

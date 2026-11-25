@@ -274,6 +274,7 @@ class RunProcessor:
         self.session.commit()
         outcome = runner.run(plan)
         duration = int((time.monotonic() - started) * 1000)
+        _log_step_timing(item, step, duration, runner.timings)
 
         if outcome.status == "ok":
             self._record_success(item, step, outcome, duration, values)
@@ -579,6 +580,34 @@ def requeue_item_after_crash(item: RunItem) -> None:
         )
     else:
         item.status = ItemStatus.PENDING
+
+
+_PHASE_NAMES = {
+    "locate": "achar",
+    "act": "agir",
+    "settle": "esperar a página",
+    "check": "conferir",
+}
+
+
+def _log_step_timing(
+    item: RunItem, step: Step, duration_ms: int, timings: dict[str, float]
+) -> None:
+    """Uma linha por passo no log do worker: onde a execução gastou o tempo. Só tempos e o
+    número do passo, nenhum valor digitado."""
+    measured = sum(timings.values())
+    parts = [
+        f"{_PHASE_NAMES[phase]} {timings[phase]:.1f}s" for phase in _PHASE_NAMES if phase in timings
+    ]
+    parts.append(f"outros {max(duration_ms / 1000 - measured, 0):.1f}s")
+    logger.info(
+        "Linha %s, passo %s (%s): %.1fs no total; %s",
+        item.position,
+        step.position,
+        step.action.value if hasattr(step.action, "value") else step.action,
+        duration_ms / 1000,
+        ", ".join(parts),
+    )
 
 
 def diagnostics_key_for(screenshot_key: str) -> str | None:
