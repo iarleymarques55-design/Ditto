@@ -2,6 +2,7 @@
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,10 +44,80 @@ _PAGE_FINGERPRINT = """() => {
 }"""
 _POLL_SECONDS = 0.1
 
+# Fica no quadro anotando a hora da última mudança (estrutura, texto, abrir e fechar, marcar):
+# conferir depois é uma pergunta só, sem ler o texto da página. Mudança de estilo, como uma
+# animação, não conta, senão um carrossel faria todo passo esperar o tempo máximo
+_QUIET_PROBE = """() => {
+  let state = window.__dittoQuiet;
+  if (!state) {
+    state = { last: performance.now() };
+    try {
+      new MutationObserver(() => { state.last = performance.now(); }).observe(document, {
+        subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ['class', 'aria-expanded', 'aria-selected', 'aria-checked',
+          'aria-pressed', 'aria-busy', 'open', 'hidden', 'disabled'],
+      });
+    } catch (error) {
+      return 1e9;
+    }
+    Object.defineProperty(window, '__dittoQuiet', { value: state });
+  }
+  return performance.now() - state.last;
+}"""
+_LOAD_WAIT_MS = 3000
+_MIN_WAIT_SECONDS = 0.15
+
 
 @dataclass
 class PageState:
     fingerprint: str
+
+
+def _quiet_for(page: Page, limit: float) -> float:
+    """Há quanto tempo nenhum quadro muda. Quadro que não responde fica de fora, menos o
+    principal: sem resposta dele, a página está trocando de endereço."""
+    quiet = limit
+    for frame in page.frames:
+        try:
+            quiet = min(quiet, frame.evaluate(_QUIET_PROBE) / 1000)
+        except PlaywrightError:
+            if frame == page.main_frame:
+                return 0.0
+    return quiet
+
+
+def wait_until_quiet(
+    page: Page,
+    *,
+    busy: Callable[[], bool] = lambda: False,
+    quiet_seconds: float,
+    max_seconds: float,
+) -> None:
+    """Espera a página ficar parada por um tempo. Uma animação sem fim só custa o máximo.
+
+    Cada pergunta ao Chrome atravessa a rede quando ele está no computador da pessoa: em vez de
+    fotografar a página várias vezes, pergunta uma vez por quadro há quanto tempo ele está parado
+    e dorme só o que falta."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=_LOAD_WAIT_MS)
+    except PlaywrightError:
+        return
+    started = time.monotonic()
+    deadline = started + max_seconds
+    while True:
+        if busy():
+            missing = _MIN_WAIT_SECONDS
+        else:
+            # Parada de antes da ação não vale: o site pode responder um instante depois
+            quiet = min(_quiet_for(page, max_seconds), time.monotonic() - started)
+            missing = quiet_seconds - quiet
+        left = deadline - time.monotonic()
+        if missing <= 0 or left <= 0:
+            return
+        try:
+            page.wait_for_timeout(max(min(missing, left), _MIN_WAIT_SECONDS) * 1000)
+        except PlaywrightError:
+            return
 
 
 def capture_state(page: Page) -> PageState:
