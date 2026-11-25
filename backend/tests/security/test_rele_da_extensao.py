@@ -104,3 +104,25 @@ def test_conexoes_sem_token_do_mesmo_ip_tem_limite(
         for conexao in abertas:
             conexao.close()
         relay.stop()
+
+
+def test_extensao_de_outra_origem_aparece_no_log(
+    fabrica_sessao: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    # Com EXTENSION_ORIGINS desatualizado, a recusa era silenciosa e a extensão só dizia
+    # "esperando o Ditto responder"
+    relay = ExtensionRelay(
+        0, autenticador(fabrica_sessao), allowed_origins=["chrome-extension://id-certo"]
+    )
+    relay.start()
+    try:
+        with caplog.at_level("WARNING"):
+            with connect(
+                f"ws://127.0.0.1:{relay.port}/extension", origin="chrome-extension://id-antigo"
+            ) as conexao:
+                with pytest.raises(ConnectionClosed):
+                    conexao.recv(timeout=ESPERA_S)
+        assert "chrome-extension://id-antigo" in caplog.text
+        assert "EXTENSION_ORIGINS" in caplog.text
+    finally:
+        relay.stop()
