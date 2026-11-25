@@ -55,9 +55,38 @@ Como funciona ([runner.js](runner.js)):
 
 ## Publicar com o Ditto na nuvem
 
-O worker publicado atende várias pessoas ao mesmo tempo, cada uma no próprio Chrome.
+Ninguém precisa editar esta pasta para usar o Ditto publicado. O build do painel
+([frontend/Dockerfile](../frontend/Dockerfile)) copia a extensão, troca os endereços pelos do
+Ditto publicado ([frontend/scripts/empacotar-extensao.mjs](../frontend/scripts/empacotar-extensao.mjs))
+e coloca o resultado em `/downloads/ditto-extensao.zip`. A página **Extensão** do painel oferece
+esse arquivo e explica a instalação passo a passo.
 
-1. Em [config.js](config.js), troque `RELE_URL` pelo endereço do worker publicado, com `wss://` (ex.: `wss://ditto-worker.up.railway.app/extension`).
-2. Em `content_scripts.matches`, no [manifest.json](manifest.json), troque `http://localhost:5173/*` pelo endereço do painel (`https://...`). O Chrome só aceita endereços fixos nesse arquivo, por isso a troca é feita nele. Só as páginas dessa lista falam com a extensão. Na versão de desenvolvimento ela é `localhost:5173`, a porta padrão do Vite: com a extensão de desenvolvimento instalada, evite rodar outro projeto nessa porta.
-3. Em [config.js](config.js), ponha o endereço da API publicada em `API_URLS`. A gravação só é enviada para um endereço dessa lista ou da mesma origem do painel.
-4. No worker, preencha `EXTENSION_RELAY_HOST=0.0.0.0` e `EXTENSION_ORIGINS=["chrome-extension://<id>"]` com o id da extensão (aparece em `chrome://extensions`). Sem a lista, o worker não inicia com a porta aberta para a rede.
+O que o serviço do painel precisa ter para montar o arquivo:
+
+| Variável | Exemplo | Para quê |
+|---|---|---|
+| `VITE_API_URL` | `https://api.exemplo.com/api/v1` | Para onde a gravação é enviada |
+| `VITE_RELE_URL` | `wss://worker.exemplo.com/extension` | Onde a extensão encontra o worker para rodar as tarefas |
+| `PAINEL_URL` | `https://painel.exemplo.com` | A única página que pode falar com a extensão baixada |
+
+Fora do computador local, os endereços precisam ser `https://` e `wss://`. Sem alguma das três,
+o painel sobe normalmente e a página Extensão avisa que o download não está disponível.
+
+O build usa a raiz do repositório como contexto (`docker build -f frontend/Dockerfile .`). No
+Railway, isso quer dizer: Root Directory vazio no serviço do painel e
+`RAILWAY_DOCKERFILE_PATH=frontend/Dockerfile`.
+
+### ID fixo
+
+O `manifest.json` tem uma chave pública (`key`). Com ela, o Chrome dá sempre o mesmo ID à
+extensão, `kgnecihkofjmeingdbebfimggnaompic`, seja qual for a pasta e o computador. Por isso o
+worker publicado usa sempre o mesmo valor:
+
+```
+EXTENSION_RELAY_HOST=0.0.0.0
+EXTENSION_ORIGINS=["chrome-extension://kgnecihkofjmeingdbebfimggnaompic"]
+```
+
+Não apague a chave do manifest: sem ela, cada instalação ganha um ID diferente e o worker recusa
+todas. Como o ID é o mesmo, o Chrome não aceita duas cópias ao mesmo tempo (a desta pasta e a
+baixada): remova uma antes de carregar a outra.

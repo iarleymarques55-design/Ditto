@@ -76,6 +76,8 @@ jobs:
         run: npx oxlint
       - name: Build
         run: npm run build
+      - name: Empacotamento da extensão
+        run: node --test scripts/
       - name: Dependências com falha conhecida
         run: npm audit --omit=dev
 
@@ -86,5 +88,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Imagem da API e do worker
         run: docker build -t ditto-backend ./backend
-      - name: Imagem do painel
-        run: docker build -t ditto-web ./frontend
+      - name: Imagem do painel (com a extensão para download)
+        run: >-
+          docker build -f frontend/Dockerfile -t ditto-web
+          --build-arg VITE_API_URL=https://api.exemplo.com/api/v1
+          --build-arg VITE_RELE_URL=wss://worker.exemplo.com/extension
+          --build-arg PAINEL_URL=https://painel.exemplo.com
+          .
+      - name: O .zip da extensão está na imagem
+        run: docker run --rm ditto-web test -s /usr/share/nginx/html/downloads/ditto-extensao.zip

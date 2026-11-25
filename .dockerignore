@@ -1,0 +1,14 @@
+# Usado pelo build do painel, que tem a raiz do repositório como contexto
+# (docker build -f frontend/Dockerfile .). A API e o worker usam backend/ como contexto.
+.git
+.github
+.vscode
+docs
+backend
+**/node_modules
+frontend/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
