@@ -215,7 +215,15 @@ class ExtensionRelay:
         if request is None or request.path != "/extension":
             await connection.close(_CLOSE_POLICY, "Endereço desconhecido.")
             return
-        if not self._origin_allowed(request.headers.get("Origin", "")):
+        origin = request.headers.get("Origin", "")
+        if not self._origin_allowed(origin):
+            if origin.startswith("chrome-extension://"):
+                # Quase sempre é EXTENSION_ORIGINS com o ID antigo da extensão: sem este aviso, a
+                # extensão ficava "esperando o Ditto responder" e o log não dizia nada. O valor
+                # vem de fora, então vai entre aspas e cortado
+                logger.warning(
+                    "Extensão recusada: a origem %r não está em EXTENSION_ORIGINS.", origin[:80]
+                )
             await connection.close(_CLOSE_POLICY, "Origem não autorizada.")
             return
         if self._connections >= _MAX_CONNECTIONS:
