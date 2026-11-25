@@ -356,3 +356,43 @@ def test_horario_do_codigo_e_de_agora(
         registro = sessao.scalar(select(EmailVerification))
     restante = registro.expires_at - datetime.now(UTC)
     assert timedelta(minutes=14) < restante <= timedelta(minutes=15)
+
+
+def test_recusa_do_brevo_aparece_no_log_sem_a_chave_nem_o_codigo(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import httpx
+    from pydantic import SecretStr
+
+    from app.services import email_service
+
+    monkeypatch.setattr(settings, "brevo_api_key", SecretStr("xkeysib-chave-que-nao-pode-vazar"))
+    monkeypatch.setattr(settings, "email_from", "ditto@exemplo.com")
+    pedido = httpx.Request("POST", "https://api.brevo.com/v3/smtp/email")
+    recusa = httpx.Response(
+        401,
+        json={"code": "unauthorized", "message": "Unrecognised IP address 203.0.113.9"},
+        request=pedido,
+    )
+    monkeypatch.setattr(email_service.httpx, "post", lambda *_, **__: recusa)
+
+    with caplog.at_level(logging.WARNING):
+        enviado = email_service.send_email(EMAIL, "Seu código do Ditto: 482913", "Código 482913")
+
+    assert enviado is False
+    assert "HTTP 401" in caplog.text
+    assert "Unrecognised IP address" in caplog.text
+    assert "xkeysib" not in caplog.text
+    assert "482913" not in caplog.text
+
+
+def test_sem_brevo_configurado_o_aviso_aparece_no_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from app.services import email_service
+
+    monkeypatch.setattr(settings, "brevo_api_key", None)
+
+    with caplog.at_level(logging.WARNING):
+        assert email_service.send_email(EMAIL, "assunto", "texto") is False
+    assert "BREVO_API_KEY" in caplog.text
