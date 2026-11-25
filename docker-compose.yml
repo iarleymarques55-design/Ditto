@@ -86,10 +86,15 @@ services:
 
   web:
     build:
-      context: ./frontend
+      # A raiz do repositório: a imagem também empacota a pasta extension/ para download
+      context: .
+      dockerfile: frontend/Dockerfile
       args:
         VITE_API_URL: http://localhost:8000/api/v1
         VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+        # A extensão baixada em "Extensão" já vem apontando para este computador
+        VITE_RELE_URL: ws://127.0.0.1:8765/extension
+        PAINEL_URL: http://localhost:5173
     depends_on:
       - api
     # A extensão conversa com o painel em localhost:5173

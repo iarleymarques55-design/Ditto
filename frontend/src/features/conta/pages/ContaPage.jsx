@@ -4,7 +4,6 @@ import AvisosConta from '../components/AvisosConta.jsx'
 import Cracha from '../components/Cracha.jsx'
 import DadosConta from '../components/DadosConta.jsx'
 import ExcluirConta from '../components/ExcluirConta.jsx'
-import ExecutorConta from '../components/ExecutorConta.jsx'
 import SenhaConta from '../components/SenhaConta.jsx'
 
 function ContaPage() {
@@ -22,7 +21,6 @@ function ContaPage() {
         <div className="divide-y divide-dashed divide-tinta-media [&>section]:py-8 [&>section:first-child]:pt-0 [&>section:last-child]:pb-0">
           <DadosConta />
           <AvisosConta />
-          <ExecutorConta />
           <SenhaConta />
           <AcessosConta />
           <ExcluirConta />

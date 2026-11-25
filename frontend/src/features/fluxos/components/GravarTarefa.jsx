@@ -15,21 +15,15 @@ function SemExtensao({ idTitulo, aoFechar }) {
       <h2 id={idTitulo} className={classeTitulo}>
         Falta instalar o gravador
       </h2>
-      <p className={classeTexto}>É uma extensão do Chrome. Ela só grava a aba que você abrir por aqui.</p>
-      <ol className="mt-4 list-decimal space-y-2 pl-5 text-[15px] leading-relaxed text-navy">
-        <li>
-          Abra <code className="font-mono text-[13.5px]">chrome://extensions</code> em uma aba nova.
-        </li>
-        <li>Ligue o <strong>Modo do desenvolvedor</strong>, no canto superior direito.</li>
-        <li>
-          Clique em <strong>Carregar sem compactação</strong> e escolha a pasta{' '}
-          <code className="font-mono text-[13.5px]">extension</code> do projeto.
-        </li>
-        <li>Volte aqui e recarregue a página.</li>
-      </ol>
-      <p className="mt-3 text-[14px] text-grafite">Também funciona no Edge e no Brave.</p>
+      <p className={classeTexto}>
+        É uma extensão do Chrome. Ela só grava a aba que você abrir por aqui. A página Extensão tem o arquivo para baixar e
+        o passo a passo da instalação, que leva uns dois minutos.
+      </p>
       <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <Botao data-foco-inicial onClick={() => window.location.reload()}>
+        <Botao para="/painel/extensao" data-foco-inicial onClick={aoFechar}>
+          Ver como instalar
+        </Botao>
+        <Botao variante="contorno" onClick={() => window.location.reload()}>
           Já instalei, recarregar
         </Botao>
         <Botao variante="discreto" onClick={aoFechar}>

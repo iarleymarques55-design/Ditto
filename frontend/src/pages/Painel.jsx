@@ -7,6 +7,7 @@ import { AtalhoConta, ContaPage } from '../features/conta/index.js'
 import { CriarComIa, PedidoIaPage } from '../features/criar-com-ia/index.js'
 import { DashboardPage } from '../features/dashboard/index.js'
 import { ExecucaoDetalhePage, ExecucoesPage, NovaExecucaoPage } from '../features/execucoes/index.js'
+import { ExtensaoPage } from '../features/extensao/index.js'
 import { FluxoDetalhePage, FluxosPage, GravarTarefa } from '../features/fluxos/index.js'
 import { ReparosPage, usePedidos } from '../features/reparos/index.js'
 
@@ -48,6 +49,7 @@ function Painel() {
         <Route path="execucoes/nova" element={<NovaExecucaoPage />} />
         <Route path="execucoes/:id" element={<ExecucaoDetalhePage />} />
         <Route path="reparos" element={<ReparosPage />} />
+        <Route path="extensao" element={<ExtensaoPage />} />
         <Route path="conta" element={<ContaPage />} />
         <Route path="*" element={<PaginaNaoEncontrada />} />
       </Route>

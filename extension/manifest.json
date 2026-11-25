@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Grava uma tarefa feita no navegador e roda as repetições neste Chrome, em abas abertas pelo Ditto.",
   "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq3XBN1L3HTi9JrdbH+WgM9Lpr+wWlD9upGPd7GFBxh8KCOp9YFOUMZFqPS6xOSC2aqmKLHZ0ijXN9etwtCT89WYBIVTMqy1vfGHd3+R9psOlP/XU4kfZ/mK4vBUO914Uc4vvOLZjSCBHwNjwsjHWZymXS1gyLZ2FgawHh5U64PSmMewqmnI8aBknKAZJaIeePp36G2sL4TYNixkQPz+v8E3vHnZAOHWqPhSUF39ndBaCxu/xpvWCMtQZ6TraNWR8ZTdrzMFhPLUGkYx4od8Yz3zxPX8KRxZyoZYtLdIyYo+f+ajnhmRVaxnejY4U8ymcH07EyiSvnNm0TzB5R0W2iQIDAQAB",
   "permissions": ["storage", "scripting", "tabs", "webNavigation", "downloads", "debugger", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },

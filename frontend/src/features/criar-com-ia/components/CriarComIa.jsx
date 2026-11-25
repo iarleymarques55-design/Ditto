@@ -37,8 +37,8 @@ function SemExecutor({ idTitulo, motivo, aoFechar }) {
         A IA monta a tarefa numa aba ao lado, neste Chrome, para usar as contas em que você já entrou. {motivo}
       </p>
       <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <Botao para="/painel/conta" data-foco-inicial onClick={aoFechar}>
-          Abrir a página da conta
+        <Botao para="/painel/extensao" data-foco-inicial onClick={aoFechar}>
+          Abrir a página da extensão
         </Botao>
         <Botao variante="discreto" onClick={aoFechar}>
           Fechar

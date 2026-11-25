@@ -34,7 +34,7 @@ const ESTADOS = {
   'sem-resposta': { marcador: 'bg-grafite', texto: 'A extensão não respondeu. Recarregue a página.' },
   'sem-extensao': {
     marcador: 'bg-grafite',
-    texto: 'A extensão do Ditto não está instalada neste Chrome. Instale e recarregue a página.',
+    texto: 'A extensão do Ditto não está instalada neste Chrome. Siga os passos acima e recarregue a página.',
   },
 }
 
@@ -43,7 +43,7 @@ const AGUARDANDO = ['aguardando-confirmacao', 'conectando', 'desconectado']
 
 const esperar = (ms) => new Promise((resolver) => setTimeout(resolver, ms))
 
-function ExecutorConta() {
+function ExecutorChrome() {
   const { usuario } = useAuth()
   const [status, setStatus] = useState(null)
   const [ocupado, setOcupado] = useState(null)
@@ -138,4 +138,4 @@ function ExecutorConta() {
   )
 }
 
-export default ExecutorConta
+export default ExecutorChrome

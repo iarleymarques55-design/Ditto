@@ -5,6 +5,7 @@ const ABAS = [
   { rotulo: 'Tarefas', para: '/painel/tarefas' },
   { rotulo: 'Execuções', para: '/painel/execucoes' },
   { rotulo: 'Reparos', para: '/painel/reparos', comContagem: true },
+  { rotulo: 'Extensão', para: '/painel/extensao' },
 ]
 
 // Abas de divisória de fichário: saem da borda direita da folha no desktop e do topo no celular.
