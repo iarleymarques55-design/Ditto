@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Query, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -15,16 +15,19 @@ MAX_PAGE_SIZE = 100
 
 _bearer = HTTPBearer(auto_error=False, description="Token recebido ao entrar ou criar a conta.")
 
-UNAUTHORIZED_RESPONSE = {
+# O mesmo tipo que o FastAPI espera em "responses": sem ele, o verificador de tipos reclama
+ResponsesDoc = dict[int | str, dict[str, Any]]
+
+UNAUTHORIZED_RESPONSE: ResponsesDoc = {
     401: {"model": ErrorResponse, "description": "Token ausente, inválido ou vencido."}
 }
-NOT_FOUND_RESPONSE = {
+NOT_FOUND_RESPONSE: ResponsesDoc = {
     404: {"model": ErrorResponse, "description": "Não existe ou é de outra conta."}
 }
-RULE_RESPONSE = {
+RULE_RESPONSE: ResponsesDoc = {
     400: {"model": ErrorResponse, "description": "Uma regra de negócio não permitiu a operação."}
 }
-CONFLICT_RESPONSE = {
+CONFLICT_RESPONSE: ResponsesDoc = {
     409: {"model": ErrorResponse, "description": "O estado atual não permite a operação."}
 }
 

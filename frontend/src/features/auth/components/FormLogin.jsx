@@ -20,7 +20,7 @@ function FormLogin() {
         className="flex flex-col gap-4"
         onSubmit={(evento) => {
           evento.preventDefault()
-          enviar(() => entrar({ email, senha }))
+          enviar(() => entrar({ email, senha }), { email })
         }}
       >
         <Campo

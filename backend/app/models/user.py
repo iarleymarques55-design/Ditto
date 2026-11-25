@@ -19,8 +19,15 @@ class User(IdTimestampMixin, Base):
     email_alerts: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # Tokens emitidos antes disto não valem mais: trocar a senha encerra as outras sessões
     tokens_valid_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Nulo enquanto a pessoa não digita o código enviado por e-mail. Sem isso ela não entra:
+    # qualquer um poderia criar uma conta com o e-mail de outra pessoa
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Só para o token do executor: "Desligar este Chrome" encerra a extensão sem derrubar o login
     runner_tokens_valid_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def email_verified(self) -> bool:
+        return self.email_verified_at is not None
 
     @property
     def has_password(self) -> bool:

@@ -49,6 +49,47 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128, description="Senha da conta.")
 
 
+class VerificationPendingResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "email": "carla@empresa.com.br",
+                    "message": "Enviamos um código de 6 dígitos para o seu e-mail.",
+                }
+            ]
+        }
+    )
+
+    email: EmailStr = Field(description="E-mail para onde o código foi enviado.")
+    message: str = Field(
+        default="Enviamos um código de 6 dígitos para o seu e-mail.",
+        description="Texto para mostrar a quem acabou de criar a conta.",
+    )
+
+
+class VerifyEmailRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"email": "carla@empresa.com.br", "code": "482913"}]},
+    )
+
+    email: EmailStr = Field(description="E-mail da conta que está sendo confirmada.")
+    code: str = Field(pattern=r"^\d{6}$", description="Código de 6 dígitos recebido por e-mail.")
+
+
+class ResendCodeRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"examples": [{"email": "carla@empresa.com.br"}]}
+    )
+
+    email: EmailStr = Field(description="E-mail da conta que ainda não foi confirmada.")
+
+
+class MessageResponse(BaseModel):
+    message: str = Field(description="Texto para mostrar a quem fez o pedido.")
+
+
 class GoogleLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

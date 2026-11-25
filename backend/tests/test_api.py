@@ -30,13 +30,22 @@ def test_migracao_cria_exatamente_o_que_os_models_descrevem(engine_de_teste: Eng
 # Contas
 
 
-def test_criar_conta_e_entrar(api: TestClient) -> None:
+def test_criar_conta_e_entrar(api: TestClient, codigos_enviados: dict[str, str]) -> None:
     corpo = {"name": "Carla", "email": "Carla@Empresa.com", "password": "senha-bem-longa"}
     criada = api.post("/api/v1/auth/register", json=corpo)
     assert criada.status_code == 201
-    assert criada.json()["user"]["email"] == "carla@empresa.com"
+    assert criada.json()["email"] == "carla@empresa.com"
+    # Sem o código, nada de token
+    assert "access_token" not in criada.json()
     assert "senha-bem-longa" not in criada.text
     assert "password_hash" not in criada.text
+
+    confirmada = api.post(
+        "/api/v1/auth/verify-email",
+        json={"email": "carla@empresa.com", "code": codigos_enviados["carla@empresa.com"]},
+    )
+    assert confirmada.status_code == 200
+    assert confirmada.json()["user"]["email"] == "carla@empresa.com"
 
     entrou = api.post(
         "/api/v1/auth/login", json={"email": "carla@empresa.com", "password": "senha-bem-longa"}
@@ -94,11 +103,13 @@ def test_google_cria_conta_na_primeira_vez(api: TestClient) -> None:
     assert resposta.json()["user"]["email"] == "a@teste.com"
 
 
-def test_google_tira_a_senha_de_conta_criada_antes_com_o_mesmo_email(
-    api: TestClient, criar_conta: Callable[..., Cabecalho]
-) -> None:
-    # Sem isso, quem cadastrou o e-mail de outra pessoa continuaria entrando na conta dela
-    criar_conta(email="a@teste.com", senha="senha-do-invasor")
+def test_google_tira_a_senha_de_conta_criada_antes_com_o_mesmo_email(api: TestClient) -> None:
+    # Sem isso, quem cadastrou o e-mail de outra pessoa continuaria entrando na conta dela.
+    # O invasor cadastra, mas nunca confirma: o código vai para o e-mail da vítima
+    api.post(
+        "/api/v1/auth/register",
+        json={"name": "Invasor", "email": "a@teste.com", "password": "senha-do-invasor"},
+    )
     with patch("app.services.auth_service._verify_google_token", return_value=_claims()):
         assert api.post("/api/v1/auth/google", json={"credential": "token"}).status_code == 200
 

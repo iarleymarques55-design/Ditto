@@ -6,11 +6,15 @@ from app.core.security import create_recording_token, create_runner_token
 from app.schemas.auth import (
     GoogleLoginRequest,
     LoginRequest,
+    MessageResponse,
     RecordingTokenResponse,
     RegisterRequest,
+    ResendCodeRequest,
     RunnerTokenResponse,
     TokenResponse,
     UserResponse,
+    VerificationPendingResponse,
+    VerifyEmailRequest,
 )
 from app.schemas.error import ErrorResponse
 from app.services.auth_service import AuthService
@@ -24,18 +28,61 @@ _RATE_LIMIT_RESPONSE = {
 
 @router.post(
     "/register",
-    response_model=TokenResponse,
+    response_model=VerificationPendingResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Criar conta",
-    description="Cria a conta e já devolve o token de acesso. O e-mail precisa ser único.",
+    description=(
+        "Cria a conta e manda um código de 6 dígitos para o e-mail. A conta só entra depois de "
+        "confirmar o código em `/auth/verify-email`. Se o e-mail já tem uma conta nunca "
+        "confirmada, ela é substituída por esta."
+    ),
     responses={
-        409: {"model": ErrorResponse, "description": "E-mail já cadastrado."},
+        409: {"model": ErrorResponse, "description": "E-mail já cadastrado e confirmado."},
+        503: {"model": ErrorResponse, "description": "O e-mail com o código não pôde ser enviado."},
         **_RATE_LIMIT_RESPONSE,
     },
     dependencies=[Depends(limit_requests(10))],
 )
-def register(payload: RegisterRequest, session: DbSession) -> TokenResponse:
+def register(payload: RegisterRequest, session: DbSession) -> VerificationPendingResponse:
     return AuthService(session).register(payload)
+
+
+@router.post(
+    "/verify-email",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Confirmar o e-mail",
+    description=(
+        "Confere o código enviado por e-mail e devolve o token de acesso. O código vale 15 "
+        "minutos e aceita 5 tentativas; depois disso é preciso pedir outro."
+    ),
+    responses={
+        400: {"model": ErrorResponse, "description": "Código incorreto ou vencido."},
+        **_RATE_LIMIT_RESPONSE,
+    },
+    dependencies=[Depends(limit_requests(20))],
+)
+def verify_email(payload: VerifyEmailRequest, session: DbSession) -> TokenResponse:
+    return AuthService(session).verify_email(payload)
+
+
+@router.post(
+    "/resend-code",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Reenviar o código",
+    description=(
+        "Manda um código novo para uma conta ainda não confirmada (no máximo um por minuto e "
+        "cinco por hora). A resposta é sempre a mesma, exista a conta ou não."
+    ),
+    responses=_RATE_LIMIT_RESPONSE,
+    dependencies=[Depends(limit_requests(5))],
+)
+def resend_code(payload: ResendCodeRequest, session: DbSession) -> MessageResponse:
+    AuthService(session).resend_code(payload)
+    return MessageResponse(
+        message="Se este e-mail tem uma conta esperando confirmação, enviamos um código novo."
+    )
 
 
 @router.post(
@@ -43,9 +90,14 @@ def register(payload: RegisterRequest, session: DbSession) -> TokenResponse:
     response_model=TokenResponse,
     status_code=status.HTTP_200_OK,
     summary="Entrar",
-    description="Confere e-mail e senha. A mensagem de erro é a mesma para e-mail inexistente e senha errada.",
+    description=(
+        "Confere e-mail e senha. A mensagem de erro é a mesma para e-mail inexistente e senha "
+        "errada. Com a senha certa e o e-mail ainda não confirmado, manda um código novo e "
+        "responde 403 `EMAIL_NOT_VERIFIED`."
+    ),
     responses={
         401: {"model": ErrorResponse, "description": "E-mail ou senha incorretos."},
+        403: {"model": ErrorResponse, "description": "E-mail ainda não confirmado."},
         **_RATE_LIMIT_RESPONSE,
     },
     dependencies=[Depends(limit_requests(20))],

@@ -1,6 +1,6 @@
 import { Suspense, lazy } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router'
-import { AuthProvider, CadastroPage, LoginPage } from '../features/auth/index.js'
+import { AuthProvider, CadastroPage, ConfirmarEmailPage, LoginPage } from '../features/auth/index.js'
 import Home from '../pages/Home.jsx'
 import NaoEncontradoPage from '../pages/NaoEncontradoPage.jsx'
 import PoliticaPrivacidadePage from '../pages/PoliticaPrivacidadePage.jsx'
@@ -16,6 +16,7 @@ function AppRouter() {
           <Route path="/" element={<Home />}>
             <Route path="entrar" element={<LoginPage />} />
             <Route path="criar-conta" element={<CadastroPage />} />
+            <Route path="confirmar-email" element={<ConfirmarEmailPage />} />
           </Route>
           <Route path="/privacidade" element={<PoliticaPrivacidadePage />} />
           <Route element={<RotaProtegida />}>
