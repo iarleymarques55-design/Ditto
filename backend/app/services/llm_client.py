@@ -19,6 +19,19 @@ class LlmUnavailableError(Exception):
     """A IA não respondeu ou respondeu fora do formato. Quem chama segue sem ela."""
 
 
+def _error_kind(response: httpx.Response) -> str:
+    """O tipo e o código do erro que a IA devolveu ("invalid_request_error / model_not_found").
+    A mensagem fica de fora: ela pode repetir parte do conteúdo da página que foi enviado."""
+    try:
+        error = response.json().get("error", {})
+    except (ValueError, AttributeError):
+        return "sem detalhes"
+    if not isinstance(error, dict):
+        return "sem detalhes"
+    kind = " / ".join(str(error[key]) for key in ("type", "code") if error.get(key))
+    return kind[:120] or "sem detalhes"
+
+
 def _retry_wait(response: httpx.Response) -> float:
     try:
         wait = float(response.headers.get("retry-after", _DEFAULT_RETRY_SECONDS))
@@ -37,6 +50,7 @@ class LlmClient:
             json={
                 "model": settings.llm_model,
                 "temperature": 0,
+                "max_tokens": settings.llm_max_output_tokens,
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system},
@@ -48,6 +62,8 @@ class LlmClient:
 
     def chat_json(self, system: str, user: str) -> dict[str, Any]:
         if not settings.llm_enabled:
+            # Aviso no log: sem isto, o painel dizia "a IA não respondeu" e o log ficava vazio
+            logger.warning("IA não configurada neste serviço: preencha LLM_API_KEY e LLM_MODEL.")
             raise LlmUnavailableError("IA não configurada.")
 
         try:
@@ -60,8 +76,13 @@ class LlmClient:
             content = response.json()["choices"][0]["message"]["content"]
             parsed = json.loads(content)
         except httpx.HTTPStatusError as error:
-            # Só o status: o corpo do erro pode trazer parte do conteúdo enviado
-            logger.warning("A IA recusou o pedido: HTTP %s", error.response.status_code)
+            # 401: chave errada. 404 ou "model_not_found": LLM_MODEL errado. 413 ou
+            # "context_length_exceeded": página grande demais. 429: limite do plano
+            logger.warning(
+                "A IA recusou o pedido: HTTP %s (%s)",
+                error.response.status_code,
+                _error_kind(error.response),
+            )
             raise LlmUnavailableError("A IA não respondeu.") from error
         except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError) as error:
             # Só o tipo do erro: a mensagem pode trazer cabeçalhos ou parte do conteúdo enviado

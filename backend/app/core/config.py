@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_max_calls_per_run: int = 5
     llm_timeout_seconds: float = 30.0
+    # Teto da resposta da IA (uma decisão em JSON). Sem ele, o Groq conta o máximo do modelo
+    # no limite de tokens do plano e recusa a página inteira com "413 Payload Too Large"
+    llm_max_output_tokens: int = Field(default=2048, ge=256, le=32768)
+    # Teto do pacote que descreve a tela no Criar com IA. Em sites grandes (Google Agenda), os
+    # elementos menos úteis ficam de fora. Num plano pago da IA, pode subir
+    llm_max_payload_chars: int = Field(default=14000, ge=4000, le=400000)
     # Criar tarefa com IA: limite de passos e quanto esperar a pessoa responder uma dúvida
     ai_draft_max_steps: int = 40
     ai_draft_answer_timeout_seconds: int = 600
