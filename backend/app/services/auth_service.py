@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.exceptions import (
     ConflictError,
+    EmailNotSentError,
+    EmailNotVerifiedError,
     InvalidCredentialsError,
     ServiceNotConfiguredError,
     UnauthorizedError,
@@ -31,9 +33,13 @@ from app.schemas.auth import (
     GoogleLoginRequest,
     LoginRequest,
     RegisterRequest,
+    ResendCodeRequest,
     TokenResponse,
     UserResponse,
+    VerificationPendingResponse,
+    VerifyEmailRequest,
 )
+from app.services.email_verification_service import EmailVerificationService
 
 logger = logging.getLogger(__name__)
 
@@ -102,25 +108,64 @@ class AuthService:
         self.session = session
         self.users = UserRepository(session)
 
-    def register(self, payload: RegisterRequest) -> TokenResponse:
+    def register(self, payload: RegisterRequest) -> VerificationPendingResponse:
+        """Cria a conta ainda sem acesso e manda o código. Só entra quem digitar o código."""
         email = payload.email.lower()
-        if self.users.get_by_email(email):
+        user = self.users.get_by_email(email)
+        if user is not None and user.email_verified:
             raise ConflictError("Já existe uma conta com este e-mail.")
 
-        user = self.users.add(
-            User(
-                email=email,
-                name=payload.name.strip(),
-                password_hash=hash_password(payload.password),
+        if user is None:
+            user = self.users.add(
+                User(
+                    email=email,
+                    name=payload.name.strip(),
+                    password_hash=hash_password(payload.password),
+                )
             )
-        )
+        else:
+            # Conta criada antes e nunca confirmada: ninguém provou ser dono deste e-mail, então
+            # quem se cadastra de novo assume. Assim, quem "reservou" o e-mail de outra pessoa
+            # não a impede de criar a própria conta
+            user.name = payload.name.strip()
+            user.password_hash = hash_password(payload.password)
+            user.google_sub = None
+            user.tokens_valid_after = datetime.now(UTC)
+
         try:
+            self.session.flush()
+            # A conta só é gravada se o e-mail sair: sem o código, ela ficaria presa
+            EmailVerificationService(self.session).send_code(user)
             self.session.commit()
         except IntegrityError as error:
             # Dois cadastros simultâneos com o mesmo e-mail: o banco decide
             self.session.rollback()
             raise ConflictError("Já existe uma conta com este e-mail.") from error
+        except EmailNotSentError:
+            self.session.rollback()
+            raise
+        return VerificationPendingResponse(email=email)
+
+    def verify_email(self, payload: VerifyEmailRequest) -> TokenResponse:
+        user = self.users.get_by_email(payload.email.lower())
+        user = EmailVerificationService(self.session).confirm(user, payload.code)
         return token_for(user)
+
+    def resend_code(self, payload: ResendCodeRequest) -> None:
+        """Responde igual exista a conta ou não: ninguém descobre quais e-mails têm cadastro."""
+        user = self.users.get_by_email(payload.email.lower())
+        if user is None or user.email_verified or user.password_hash is None:
+            return
+        self._send_code_quietly(user)
+
+    def _send_code_quietly(self, user: User) -> None:
+        """Manda um código novo, se o limite deixar. Falha de envio não derruba quem chamou."""
+        try:
+            EmailVerificationService(self.session).send_code(user)
+            self.session.commit()
+        except EmailNotSentError:
+            self.session.rollback()
+            logger.warning("Não consegui enviar o código de confirmação.")
 
     def login(self, payload: LoginRequest, client: str = "desconhecido") -> TokenResponse:
         email = payload.email.lower()
@@ -133,6 +178,11 @@ class AuthService:
         user = self.users.get_by_email(email)
         if not verify_password(payload.password, user.password_hash if user else None):
             raise InvalidCredentialsError
+        if not user.email_verified:
+            # Senha certa, e-mail ainda não confirmado: manda um código novo (se o último já tem
+            # mais de 1 minuto) e o painel abre a tela do código
+            self._send_code_quietly(user)
+            raise EmailNotVerifiedError
         return token_for(user)
 
     def login_with_google(self, payload: GoogleLoginRequest) -> TokenResponse:
@@ -153,24 +203,34 @@ class AuthService:
         return token_for(user)
 
     def _find_or_create_google_user(self, claims: dict) -> User:
+        now = datetime.now(UTC)
         user = self.users.get_by_google_sub(claims["sub"])
         if user:
+            # O Google já confirmou o e-mail: conta antiga, de antes da confirmação, fica em dia
+            if not user.email_verified:
+                user.email_verified_at = now
             return user
 
         email = claims["email"].lower()
         user = self.users.get_by_email(email)
         if user:
-            # O cadastro por senha não confirma o e-mail. Sem apagar a senha, quem criou a conta
-            # antes com o e-mail de outra pessoa continuaria entrando depois que ela usasse o Google.
-            user.password_hash = None
+            if not user.email_verified:
+                # Conta de senha nunca confirmada: pode ter sido criada por outra pessoa com este
+                # e-mail. A senha dela é apagada e os tokens que ela tirou (o de acesso e o do
+                # executor, que dura 30 dias) deixam de valer
+                user.password_hash = None
+                user.tokens_valid_after = now
             user.google_sub = claims["sub"]
-            # E os tokens que essa pessoa já tinha tirado (o de acesso e o do executor, que dura
-            # 30 dias) também deixam de valer: sem isto ela continuaria ligada à conta
-            user.tokens_valid_after = datetime.now(UTC)
+            user.email_verified_at = user.email_verified_at or now
             return user
 
         return self.users.add(
-            User(email=email, name=claims.get("name") or email, google_sub=claims["sub"])
+            User(
+                email=email,
+                name=claims.get("name") or email,
+                google_sub=claims["sub"],
+                email_verified_at=now,
+            )
         )
 
     def get_runner_user(self, token: str) -> User:
@@ -199,5 +259,8 @@ class AuthService:
             raise UnauthorizedError
         # A senha foi trocada depois que este token saiu: a sessão antiga acabou
         if issued_before(issued_at, user.tokens_valid_after):
+            raise UnauthorizedError
+        # Token tirado antes de a confirmação de e-mail existir, numa conta nunca confirmada
+        if not user.email_verified:
             raise UnauthorizedError
         return user

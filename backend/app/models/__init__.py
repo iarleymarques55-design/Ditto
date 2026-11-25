@@ -1,6 +1,7 @@
 from app.models.ai_draft import AiDraft
 from app.models.base import Base
 from app.models.credential import Credential
+from app.models.email_verification import EmailVerification
 from app.models.flow import Flow, Step, StepVersion, Variable
 from app.models.repair import HelpRequest, Repair
 from app.models.run import Artifact, Run, RunItem, RunLogEntry, StepEvent
@@ -12,6 +13,7 @@ __all__ = [
     "Artifact",
     "Base",
     "Credential",
+    "EmailVerification",
     "Flow",
     "HelpRequest",
     "Repair",

@@ -57,24 +57,51 @@ def _runner_vale(fabrica: sessionmaker[Session], token: str) -> bool:
         return True
 
 
-# A1: quem cadastrou o e-mail de outra pessoa antes dela perde o acesso quando ela entra
+# A1: quem cadastrou o e-mail de outra pessoa antes dela perde o acesso quando ela entra.
+# Contas de antes da confirmação por código ficam "não confirmadas": é o caso que sobra
 
 
-def test_vincular_google_derruba_os_tokens_de_quem_cadastrou_o_email_antes(
+def _desconfirmar(fabrica: sessionmaker[Session], email: str) -> None:
+    """Deixa a conta como as que existiam antes da confirmação de e-mail."""
+    with fabrica() as sessao:
+        sessao.scalar(select(User).where(User.email == email)).email_verified_at = None
+        sessao.commit()
+
+
+def test_vincular_google_derruba_quem_cadastrou_o_email_antes(
     api: TestClient,
     criar_conta: Callable[..., Cabecalho],
     fabrica_sessao: sessionmaker[Session],
 ) -> None:
     intrusa = criar_conta(email=EMAIL)
     token_executor_da_intrusa = token_do_executor(api, intrusa)
-    assert _runner_vale(fabrica_sessao, token_executor_da_intrusa)
+    _desconfirmar(fabrica_sessao, EMAIL)
 
     dona = _entrar_com_google(api)
 
     assert api.get("/api/v1/auth/me", headers=intrusa).status_code == 401
     assert not _runner_vale(fabrica_sessao, token_executor_da_intrusa)
+    # A senha que a intrusa criou foi apagada
+    login = api.post(
+        "/api/v1/auth/login", json={"email": EMAIL, "password": "senha-longa-de-teste"}
+    )
+    assert login.status_code == 401
     # A dona continua dentro, com o token que acabou de receber
     assert api.get("/api/v1/auth/me", headers=dona).status_code == 200
+
+
+def test_conta_confirmada_que_entra_pelo_google_mantem_a_senha(
+    api: TestClient, criar_conta: Callable[..., Cabecalho]
+) -> None:
+    # Quem confirmou o e-mail por código é a dona do e-mail: o Google só ganha uma porta nova
+    criar_conta(email=EMAIL)
+
+    _entrar_com_google(api)
+
+    login = api.post(
+        "/api/v1/auth/login", json={"email": EMAIL, "password": "senha-longa-de-teste"}
+    )
+    assert login.status_code == 200
 
 
 # M4: desligar o executor sem trocar a senha

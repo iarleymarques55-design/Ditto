@@ -25,13 +25,13 @@ def test_ultima_migracao_desce_e_sobe_de_novo(engine_de_teste: Engine) -> None:
     try:
         command.downgrade(config, "-1")
         colunas = {coluna["name"] for coluna in inspect(engine_de_teste).get_columns("users")}
-        assert "runner_tokens_valid_after" not in colunas
+        assert "email_verified_at" not in colunas
     finally:
         # Os outros testes dependem do banco na última versão
         command.upgrade(config, "head")
 
     colunas = {coluna["name"] for coluna in inspect(engine_de_teste).get_columns("users")}
-    assert "runner_tokens_valid_after" in colunas
+    assert "email_verified_at" in colunas
 
 
 def test_banco_igual_aos_models(engine_de_teste: Engine) -> None:

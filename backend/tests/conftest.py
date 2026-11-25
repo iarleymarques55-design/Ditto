@@ -64,6 +64,20 @@ def _limpar_limites() -> None:
     rate_limiter.reset()
 
 
+@pytest.fixture(autouse=True)
+def codigos_enviados(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """A caixa de entrada dos testes: o último código de confirmação enviado a cada e-mail.
+    Nenhum e-mail de verdade sai daqui."""
+    caixa: dict[str, str] = {}
+
+    def entregar(user: Any, code: str) -> bool:
+        caixa[user.email] = code
+        return True
+
+    monkeypatch.setattr("app.services.email_verification_service.deliver_code", entregar)
+    return caixa
+
+
 @pytest.fixture(scope="session")
 def engine_de_teste() -> Iterator[Engine]:
     """Banco de teste de verdade, criado pelas próprias migrações."""
@@ -110,22 +124,24 @@ def api(fabrica_sessao: sessionmaker[Session]) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def criar_conta(api: TestClient) -> Callable[..., dict[str, str]]:
-    """Cria uma conta e devolve o cabeçalho de autenticação dela."""
+def criar_conta(api: TestClient, codigos_enviados: dict[str, str]) -> Callable[..., dict[str, str]]:
+    """Cria uma conta, confirma o e-mail com o código e devolve o cabeçalho de autenticação."""
     contador = {"n": 0}
 
     def criar(email: str | None = None, senha: str = "senha-longa-de-teste") -> dict[str, str]:
         contador["n"] += 1
+        endereco = (email or f"pessoa{contador['n']}@teste.com").lower()
         resposta = api.post(
             "/api/v1/auth/register",
-            json={
-                "name": "Pessoa de Teste",
-                "email": email or f"pessoa{contador['n']}@teste.com",
-                "password": senha,
-            },
+            json={"name": "Pessoa de Teste", "email": endereco, "password": senha},
         )
         assert resposta.status_code == 201, resposta.text
-        return {"Authorization": f"Bearer {resposta.json()['access_token']}"}
+        confirmada = api.post(
+            "/api/v1/auth/verify-email",
+            json={"email": endereco, "code": codigos_enviados[endereco]},
+        )
+        assert confirmada.status_code == 200, confirmada.text
+        return {"Authorization": f"Bearer {confirmada.json()['access_token']}"}
 
     return criar
 

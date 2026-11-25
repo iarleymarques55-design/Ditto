@@ -36,6 +36,25 @@ class InvalidCredentialsError(DomainError):
     detail = "E-mail ou senha incorretos."
 
 
+class EmailNotVerifiedError(DomainError):
+    """Senha certa, mas o e-mail ainda não foi confirmado. O painel abre a tela do código."""
+
+    status_code = 403
+    code = "EMAIL_NOT_VERIFIED"
+    detail = "Confirme seu e-mail para entrar. Enviamos um código para ele."
+
+
+class InvalidVerificationCodeError(DomainError):
+    code = "INVALID_CODE"
+    detail = "Código incorreto ou vencido. Peça um novo código."
+
+
+class EmailNotSentError(DomainError):
+    status_code = 503
+    code = "EMAIL_NOT_SENT"
+    detail = "Não conseguimos enviar o e-mail com o código agora. Tente de novo em alguns minutos."
+
+
 class NotFoundError(DomainError):
     status_code = 404
     code = "NOT_FOUND"
