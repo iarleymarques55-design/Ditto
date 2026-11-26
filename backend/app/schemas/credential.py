@@ -14,7 +14,7 @@ class CredentialCreate(BaseModel):
                 {
                     "domain": "portal.fornecedor.exemplo",
                     "username": "financeiro",
-                    "password": "senha-do-portal",
+                    "password": "senha-do-portal",  # nosec B105: exemplo do Swagger
                 }
             ]
         },

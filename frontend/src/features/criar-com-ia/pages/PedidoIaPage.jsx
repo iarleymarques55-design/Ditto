@@ -4,6 +4,7 @@ import Botao from '../../../components/ui/Botao.jsx'
 import EstadoConsulta from '../../../components/ui/EstadoConsulta.jsx'
 import { useTituloPagina } from '../../../lib/useTituloPagina.js'
 import { SITUACOES_ABERTAS, cancelarPedido, pedirParaIa } from '../api.js'
+import { AvisoSemChrome } from '../../extensao/index.js'
 import FolhaPassos from '../components/FolhaPassos.jsx'
 import PerguntaIa from '../components/PerguntaIa.jsx'
 import { usePedidoIa } from '../hooks/usePedidoIa.js'
@@ -145,6 +146,7 @@ function PedidoIaPage() {
 
             <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-start">
               <div className="space-y-8">
+                {pedido.situacao === 'na-fila' && pedido.chromeLigado === false && <AvisoSemChrome oQue="O pedido" />}
                 {pedido.situacao === 'esperando' && pedido.pergunta && (
                   <PerguntaIa key={pedido.pergunta.texto} pedidoId={pedido.id} pergunta={pedido.pergunta} aoResponder={consulta.recarregar} />
                 )}

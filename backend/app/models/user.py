@@ -24,6 +24,8 @@ class User(IdTimestampMixin, Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Só para o token do executor: "Desligar este Chrome" encerra a extensão sem derrubar o login
     runner_tokens_valid_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Última vez que o worker viu a extensão desta conta conectada. Vazio: nenhum Chrome ligado
+    runner_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     @property
     def email_verified(self) -> bool:

@@ -11,7 +11,7 @@ from playwright.sync_api import Browser, Playwright
 from playwright.sync_api import Error as PlaywrightError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.main import app
 from app.models.flow import Flow
 from app.models.user import User
@@ -620,3 +620,11 @@ def test_ip_inventado_pelo_cliente_nao_fura_o_limite_atras_do_proxy(
     # O cliente escreve o começo da lista; o proxy acrescenta o IP real no fim
     codigos = [_login_vindo_de(api, f"1.1.1.{i}, 203.0.113.7", i) for i in range(21)]
     assert codigos[-1] == 429
+
+
+def test_producao_recusa_senhas_com_custo_baixo() -> None:
+    """O custo baixo só existe para os testes: em produção, senha vazada seria quebrada rápido."""
+    with pytest.raises(ValueError, match="BCRYPT_ROUNDS"):
+        Settings(environment="production", allow_private_networks=False, bcrypt_rounds=4)
+    # O ambiente dos testes usa 4; em produção o valor tem que ser dito ou ficar no padrão
+    assert Settings(environment="production", allow_private_networks=False, bcrypt_rounds=12)

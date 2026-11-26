@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 
 from google.auth.exceptions import GoogleAuthError
@@ -39,6 +40,7 @@ from app.schemas.auth import (
     VerificationPendingResponse,
     VerifyEmailRequest,
 )
+from app.services import runner_presence
 from app.services.email_verification_service import EmailVerificationService
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,8 @@ def _verify_google_token(credential: str) -> dict:
 
 def token_for(user: User) -> TokenResponse:
     return TokenResponse(
-        access_token=create_access_token(user.id), user=UserResponse.model_validate(user)
+        access_token=create_access_token(user.id, user.tokens_valid_after),
+        user=UserResponse.model_validate(user),
     )
 
 
@@ -232,6 +235,19 @@ class AuthService:
                 email_verified_at=now,
             )
         )
+
+    def check_in_runner(self, token: str) -> User:
+        """Confere o token da extensão e anota que o Chrome desta conta está ligado."""
+        user = self.get_runner_user(token)
+        runner_presence.mark_seen(user)
+        self.session.commit()
+        return user
+
+    def runner_left(self, user_id: uuid.UUID) -> None:
+        user = self.users.get_by_id(user_id)
+        if user is not None:
+            runner_presence.mark_gone(user)
+            self.session.commit()
 
     def get_runner_user(self, token: str) -> User:
         """Só o token do executor liga a extensão ao worker, nem o token de acesso comum."""

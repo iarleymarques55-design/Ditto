@@ -25,7 +25,7 @@ from app.repositories.repair_repository import RepairRepository
 from app.repositories.run_repository import RunRepository
 from app.schemas.common import Page
 from app.schemas.run import RunDetail, RunSummary
-from app.services import presenters, run_lifecycle, storage
+from app.services import presenters, run_lifecycle, runner_presence, storage
 from app.services.batch import neutralize_cell, parse_rows
 from app.services.excel_report import build_workbook
 from app.services.pdf_report import ITEM_STATUS_LABELS, build_run_report
@@ -75,9 +75,11 @@ class RunService:
 
     def _detail(self, run: Run) -> RunDetail:
         counts = self.runs.counts_for([run.id]).get(run.id)
-        return presenters.run_detail(
+        detail = presenters.run_detail(
             run, counts, self.runs.latest_log(run.id), self.runs.output_summaries(run.id)
         )
+        detail.runner_connected = runner_presence.runner_connected(self.session, run.owner_id)
+        return detail
 
     def create(
         self,

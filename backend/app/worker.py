@@ -56,11 +56,18 @@ class Pool(Protocol):
 
 
 def _authenticate_runner(token: str) -> uuid.UUID | None:
+    """Confere o token e anota que o Chrome da conta está ligado: o painel usa isso para avisar
+    quando um pedido não vai andar."""
     with SessionLocal() as session:
         try:
-            return AuthService(session).get_runner_user(token).id
+            return AuthService(session).check_in_runner(token).id
         except UnauthorizedError:
             return None
+
+
+def _runner_left(user_id: uuid.UUID) -> None:
+    with SessionLocal() as session:
+        AuthService(session).runner_left(user_id)
 
 
 def _start_relay() -> ExtensionRelay | None:
@@ -72,6 +79,7 @@ def _start_relay() -> ExtensionRelay | None:
         settings.extension_runner_port,
         _authenticate_runner,
         host=settings.extension_relay_host,
+        on_leave=_runner_left,
         allowed_origins=settings.extension_origins,
         # Worker em outra máquina não lê a pasta Downloads da pessoa: nem tenta
         local_downloads=not settings.relay_is_public,

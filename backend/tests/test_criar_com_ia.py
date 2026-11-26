@@ -29,6 +29,7 @@ from app.services import ai_explorer
 from app.services.ai_draft_service import AiDraftService
 from app.services.ai_explorer import BrowserUnavailableError
 from app.services.analyzer import analyze_flow
+from app.services.auth_service import AuthService
 from app.services.engine.browser import new_guarded_context
 from app.services.engine.executor import StepPlan, StepRunner
 from app.services.engine.llm_explorer import LlmExplorer
@@ -453,6 +454,48 @@ def test_api_cria_acompanha_e_cancela(api: TestClient, autenticado: Cabecalho) -
     assert api.post(f"{caminho}/cancel", headers=autenticado).status_code == 409
     # Depois de cancelar, dá para pedir de novo
     assert api.post("/api/v1/ai-drafts", json=PEDIDO, headers=autenticado).status_code == 201
+
+
+@pytest.mark.usefixtures("ia_ligada")
+def test_pedido_na_fila_mostra_se_ha_chrome_ligado_nesta_conta(
+    api: TestClient,
+    autenticado: Cabecalho,
+    criar_conta: Callable[..., Cabecalho],
+    fabrica_sessao: sessionmaker[Session],
+) -> None:
+    caminho = f"/api/v1/ai-drafts/{api.post('/api/v1/ai-drafts', json=PEDIDO, headers=autenticado).json()['id']}"
+    # Nenhuma extensão ligada: o painel precisa avisar, senão o pedido fica "Na fila" para sempre
+    assert api.get(caminho, headers=autenticado).json()["runner_connected"] is False
+
+    # A extensão de OUTRA conta conecta: este pedido continua sem ninguém para atendê-lo
+    outra = criar_conta(email="outra@empresa.com.br")
+    token_da_outra = api.post("/api/v1/auth/runner-token", headers=outra).json()["token"]
+    with fabrica_sessao() as sessao:
+        AuthService(sessao).check_in_runner(token_da_outra)
+    assert api.get(caminho, headers=autenticado).json()["runner_connected"] is False
+
+    # A extensão desta conta conecta
+    token = api.post("/api/v1/auth/runner-token", headers=autenticado).json()["token"]
+    with fabrica_sessao() as sessao:
+        usuario = AuthService(sessao).check_in_runner(token)
+    assert api.get(caminho, headers=autenticado).json()["runner_connected"] is True
+
+    # E sai
+    with fabrica_sessao() as sessao:
+        AuthService(sessao).runner_left(usuario.id)
+    assert api.get(caminho, headers=autenticado).json()["runner_connected"] is False
+
+
+@pytest.mark.usefixtures("ia_ligada")
+def test_marca_antiga_do_chrome_conta_como_desligado(
+    api: TestClient, autenticado: Cabecalho, fabrica_sessao: sessionmaker[Session]
+) -> None:
+    caminho = f"/api/v1/ai-drafts/{api.post('/api/v1/ai-drafts', json=PEDIDO, headers=autenticado).json()['id']}"
+    with fabrica_sessao() as sessao:
+        # O worker caiu sem avisar: a última marca tem mais de 150 s
+        sessao.scalar(select(User)).runner_seen_at = datetime.now(UTC) - timedelta(minutes=5)
+        sessao.commit()
+    assert api.get(caminho, headers=autenticado).json()["runner_connected"] is False
 
 
 # ---------- iframes, planilhas e abas novas ----------

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.core.exceptions import UnauthorizedError
-from app.core.security import ALGORITHM
+from app.core.security import ALGORITHM, create_access_token
 from app.models.user import User
 from app.services.auth_service import AuthService
 from app.services.engine.extension_relay import ExtensionRelay
@@ -158,6 +158,47 @@ def test_token_emitido_no_mesmo_segundo_da_revogacao_nao_vale(
         sessao.commit()
 
     assert api.get("/api/v1/auth/me", headers=autenticado).status_code == 401
+
+
+def test_token_do_mesmo_milissegundo_da_revogacao_nao_vale(
+    api: TestClient, autenticado: Cabecalho, fabrica_sessao: sessionmaker[Session]
+) -> None:
+    """Sem depender do relógio: o token e a revogação caem exatamente no mesmo milissegundo."""
+    dono = id_da_conta(api, autenticado)
+    instante = datetime.now(UTC).replace(microsecond=123000)
+    with fabrica_sessao() as sessao:
+        sessao.scalar(select(User)).tokens_valid_after = instante
+        sessao.commit()
+    token = jwt.encode(
+        {
+            "sub": str(dono),
+            "iat": instante,
+            "iat_ms": int(instante.timestamp() * 1000),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
+        },
+        settings.jwt_secret.get_secret_value(),
+        algorithm=ALGORITHM,
+    )
+
+    resposta = api.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert resposta.status_code == 401
+
+
+def test_token_novo_dado_logo_depois_da_revogacao_continua_valendo(
+    api: TestClient, autenticado: Cabecalho, fabrica_sessao: sessionmaker[Session]
+) -> None:
+    # A revogação "no futuro" simula o token novo saindo no mesmo milissegundo dela
+    revogacao = datetime.now(UTC) + timedelta(milliseconds=50)
+    with fabrica_sessao() as sessao:
+        usuario = sessao.scalar(select(User))
+        usuario.tokens_valid_after = revogacao
+        sessao.commit()
+        token = create_access_token(usuario.id, revogacao)
+
+    resposta = api.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert resposta.status_code == 200
 
 
 # M10: conta do Google (sem senha) só define senha ou se apaga com login recente

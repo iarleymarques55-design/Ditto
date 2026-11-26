@@ -1,5 +1,5 @@
 import io
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape  # nosec B406: escreve texto no PDF, não lê XML
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4

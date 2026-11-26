@@ -118,7 +118,7 @@ def test_respostas_nao_ficam_em_cache(client: TestClient) -> None:
 
 
 def test_producao_manda_hsts_e_fecha_a_documentacao() -> None:
-    producao = Settings(environment="production", allow_private_networks=False)
+    producao = Settings(environment="production", allow_private_networks=False, bcrypt_rounds=12)
     with TestClient(create_app(producao), raise_server_exceptions=False) as cliente:
         resposta = cliente.get("/api/v1/auth/me")
         assert resposta.headers["Strict-Transport-Security"].startswith("max-age=")

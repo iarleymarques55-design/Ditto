@@ -45,6 +45,8 @@ function mapearPedido(pedido) {
     pergunta: pedido.question ? { texto: pedido.question.text, opcoes: pedido.question.options } : null,
     erro: pedido.error,
     tarefaId: pedido.flow_id,
+    // false: nenhum Chrome ligado a esta conta, e o pedido não vai sair da fila
+    chromeLigado: pedido.runner_connected,
   }
 }
 

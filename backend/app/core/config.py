@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     test_database_url: SecretStr | None = None
     # Sem ENVIRONMENT, vale o modo mais seguro: /docs fechado e rede interna bloqueada
     environment: Literal["development", "production"] = "production"
+    # Custo do bcrypt nas senhas. Cada ponto dobra o tempo; os testes usam 4 para não esperar
+    # meio segundo a cada login. Em produção, nunca menos que 12
+    bcrypt_rounds: int = Field(default=12, ge=4, le=16)
     cors_origins: list[str] = ["http://localhost:5173"]
     # Quantos proxies confiáveis ficam na frente da API. 0 no seu computador; 1 no Railway.
     # Com 0, o cabeçalho X-Forwarded-For é ignorado: ninguém escolhe o próprio IP
@@ -115,6 +118,8 @@ class Settings(BaseSettings):
     def _block_unsafe_production(self) -> Self:
         if self.environment == "production" and self.allow_private_networks:
             raise ValueError("ALLOW_PRIVATE_NETWORKS não pode ficar ligado em produção.")
+        if self.environment == "production" and self.bcrypt_rounds < 12:
+            raise ValueError("BCRYPT_ROUNDS precisa ser 12 ou mais em produção.")
         if self.s3_bucket and not (self.s3_access_key_id and self.s3_secret_access_key):
             raise ValueError(
                 "Com S3_BUCKET, preencha também S3_ACCESS_KEY_ID e S3_SECRET_ACCESS_KEY."

@@ -89,3 +89,10 @@ class AiDraftResponse(BaseModel):
     flow_id: uuid.UUID | None = Field(description="A tarefa criada, quando terminou.")
     created_at: datetime = Field(description="Quando o pedido foi feito.")
     updated_at: datetime = Field(description="Última mudança.")
+    runner_connected: bool | None = Field(
+        default=None,
+        description=(
+            "Se há um Chrome ligado a esta conta pela extensão. Falso: o pedido fica na fila até "
+            "ligar. Vazio quando o worker usa o próprio navegador."
+        ),
+    )

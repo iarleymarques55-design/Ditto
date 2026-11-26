@@ -77,6 +77,8 @@ export function mapearExecucao(execucao) {
       colunas: captura.columns,
     })),
     passos: execucao.steps.map((passo) => ({ posicao: passo.position, intencao: passo.intent })),
+    // false: nenhum Chrome ligado a esta conta, e a execução não vai sair da fila
+    chromeLigado: execucao.runner_connected,
     log: execucao.log.map((linha) => ({
       id: linha.id,
       tipo: LOG[linha.level].tipo,

@@ -4,6 +4,7 @@ import Botao from '../../../components/ui/Botao.jsx'
 import EstadoConsulta from '../../../components/ui/EstadoConsulta.jsx'
 import { formatarDuracao, formatarQuando } from '../../../lib/datas.js'
 import { useTituloPagina } from '../../../lib/useTituloPagina.js'
+import { AvisoSemChrome } from '../../extensao/index.js'
 import { ListaPedidos, usePedidos } from '../../reparos/index.js'
 import { baixarRelatorio, cancelarExecucao, exportarExcel, exportarPlanilha } from '../api.js'
 import DadosCapturados from '../components/DadosCapturados.jsx'
@@ -91,6 +92,12 @@ function Detalhe({ execucao, aoMudar }) {
         </div>
         <StatusExecucao situacao={execucao.situacao} carimbo />
       </div>
+
+      {execucao.situacao === 'fila' && execucao.chromeLigado === false && (
+        <div className="mt-6 max-w-[62ch]">
+          <AvisoSemChrome oQue="A execução" />
+        </div>
+      )}
 
       {pedidos.length > 0 && (
         <section aria-label="Esperando você" className="mt-8">

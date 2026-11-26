@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.services import worker_tasks
 from app.services.ai_explorer import BrowserUnavailableError
-from app.services.engine.browser import connect_user_browser, launch_browser
+from app.services.engine.browser import connect_user_browser, launch_browser, set_domain_filter
 
 logger = logging.getLogger("ditto.worker")
 
@@ -39,6 +39,8 @@ class Relay(Protocol):
     def connected_users(self) -> list[uuid.UUID]: ...
 
     def cdp_url_for(self, user_id: uuid.UUID) -> str: ...
+
+    def set_allowed_domains(self, user_id: uuid.UUID, domains: list[str]) -> bool: ...
 
 
 class Lane(threading.Thread):
@@ -179,10 +181,20 @@ class WorkerPool:
                 owner_id,
                 f"conta-{str(owner_id)[:8]}",
                 owner_id,
-                lambda playwright, url=url: self._connect(playwright, url),
+                lambda playwright, url=url, owner_id=owner_id: self._open_user_browser(
+                    relay, playwright, url, owner_id
+                ),
                 lambda owner_id=owner_id: owner_id in relay.connected_users(),
             )
         self._warned_full = False
+
+    def _open_user_browser(
+        self, relay: Relay, playwright: Playwright, url: str, owner_id: uuid.UUID
+    ) -> Browser:
+        browser = self._connect(playwright, url)
+        # A extensão barra sozinha a navegação para fora da tarefa: sem ida e volta pelo worker
+        set_domain_filter(browser, lambda domains: relay.set_allowed_domains(owner_id, domains))
+        return browser
 
     def _start(
         self,

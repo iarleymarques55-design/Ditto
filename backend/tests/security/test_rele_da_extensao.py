@@ -1,6 +1,7 @@
 """Relé da extensão: nomes de arquivo vindos de fora e conexões que só ocupam vaga."""
 
 import json
+import time
 import uuid
 from pathlib import Path
 
@@ -124,5 +125,29 @@ def test_extensao_de_outra_origem_aparece_no_log(
                     conexao.recv(timeout=ESPERA_S)
         assert "chrome-extension://id-antigo" in caplog.text
         assert "EXTENSION_ORIGINS" in caplog.text
+    finally:
+        relay.stop()
+
+
+def test_extensao_que_sai_e_anotada_para_o_painel() -> None:
+    """Sem o aviso, o painel continuaria achando que o Chrome está ligado e não avisaria que o
+    pedido parou na fila."""
+    conta = uuid.uuid4()
+    sairam: list[uuid.UUID] = []
+    relay = ExtensionRelay(
+        0, lambda token: conta if token == "certo" else None, on_leave=sairam.append
+    )
+    relay.start()
+    try:
+        with connect(
+            f"ws://127.0.0.1:{relay.port}/extension", origin="chrome-extension://abc"
+        ) as extensao:
+            extensao.send(json.dumps({"type": "hello", "token": "certo"}))
+            assert json.loads(extensao.recv(timeout=ESPERA_S))["type"] == "welcome"
+            assert relay.connected_users() == [conta]
+        limite = time.monotonic() + ESPERA_S
+        while not sairam and time.monotonic() < limite:
+            time.sleep(0.05)
+        assert sairam == [conta]
     finally:
         relay.stop()

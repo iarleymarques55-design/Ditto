@@ -19,6 +19,8 @@ os.environ["BREVO_API_KEY"] = ""
 os.environ["ALLOW_PRIVATE_NETWORKS"] = "true"
 os.environ["STORAGE_DIR"] = tempfile.mkdtemp(prefix="ditto-testes-")
 os.environ["STEP_TIMEOUT_MS"] = "3000"
+# Senhas com custo baixo: cada login de teste não espera meio segundo pelo bcrypt
+os.environ["BCRYPT_ROUNDS"] = "4"
 os.environ["POSTCONDITION_TIMEOUT_MS"] = "1200"
 os.environ["ELEMENT_WAIT_MS"] = "400"
 # Os testes nunca abrem janela nem usam o Chrome da pessoa, seja qual for o .env

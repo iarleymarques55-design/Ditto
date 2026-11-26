@@ -88,3 +88,10 @@ class RunDetail(RunSummary):
     items: list[RunItemResponse] = Field(description="Linhas, em ordem.")
     log: list[RunLogLine] = Field(description="Últimas linhas do registro.")
     steps: list[RunStep] = Field(description="Passos da tarefa.")
+    runner_connected: bool | None = Field(
+        default=None,
+        description=(
+            "Se há um Chrome ligado a esta conta pela extensão. Falso: a execução fica na fila "
+            "até ligar. Vazio quando o worker usa o próprio navegador."
+        ),
+    )

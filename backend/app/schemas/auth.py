@@ -26,7 +26,7 @@ class RegisterRequest(BaseModel):
                 {
                     "name": "Carla Souza",
                     "email": "carla@empresa.com.br",
-                    "password": "uma-senha-longa",
+                    "password": "uma-senha-longa",  # nosec B105: exemplo do Swagger
                 }
             ]
         },
@@ -41,7 +41,10 @@ class LoginRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
-            "examples": [{"email": "carla@empresa.com.br", "password": "uma-senha-longa"}]
+            # Exemplo do Swagger, não é uma senha de verdade
+            "examples": [
+                {"email": "carla@empresa.com.br", "password": "uma-senha-longa"}  # nosec B105
+            ]
         },
     )
 
@@ -107,7 +110,7 @@ class UserResponse(BaseModel):
                     "id": "7b1f3c52-1111-4a55-9c0e-2f6f7b1f3c52",
                     "name": "Carla Souza",
                     "email": "carla@empresa.com.br",
-                    "has_password": True,
+                    "has_password": True,  # nosec B105: diz se a conta tem senha, não é uma senha
                     "avatar_id": None,
                     "email_alerts": True,
                 }
