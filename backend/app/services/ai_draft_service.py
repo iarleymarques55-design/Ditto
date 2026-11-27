@@ -16,6 +16,7 @@ from app.models.ai_draft import AiDraft
 from app.models.enums import AiDraftStatus
 from app.repositories.ai_draft_repository import OPEN_STATUSES, AiDraftRepository
 from app.schemas.ai_draft import AiDraftAnswer, AiDraftCreate, AiDraftResponse
+from app.services import runner_presence
 
 MAX_LISTED = 20
 MAX_EVENTS_SHOWN = 200
@@ -81,7 +82,9 @@ class AiDraftService:
         return [to_response(draft) for draft in self.drafts.list_owned(owner_id, MAX_LISTED)]
 
     def get(self, draft_id: uuid.UUID, owner_id: uuid.UUID) -> AiDraftResponse:
-        return to_response(self._get(draft_id, owner_id))
+        response = to_response(self._get(draft_id, owner_id))
+        response.runner_connected = runner_presence.runner_connected(self.session, owner_id)
+        return response
 
     def answer(
         self, draft_id: uuid.UUID, owner_id: uuid.UUID, payload: AiDraftAnswer

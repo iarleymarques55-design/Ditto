@@ -24,7 +24,7 @@ from app.repositories.ai_draft_repository import OPEN_STATUSES, AiDraftRepositor
 from app.schemas.flow import RecordedStep, RecordingCreate
 from app.services import sanitizer
 from app.services.engine import capture, postcondition
-from app.services.engine.browser import ItemTabs, host_matches
+from app.services.engine.browser import ItemTabs, goto_after_unblock, host_matches
 from app.services.engine.llm_explorer import ExplorerDecision, LlmExplorer
 from app.services.engine.safety import looks_irreversible
 from app.services.engine.screen_data import (
@@ -157,6 +157,7 @@ class AiExplorer:
         # Lista compartilhada com o filtro da aba: liberar um domínio vale na hora
         self.allowed: list[str] = [host for host in draft.allowed_hosts if host]
         self.blocked: list[str] = []
+        self._tabs: ItemTabs | None = None
         self.done: list[str] = []
         self.answers: list[dict[str, str]] = []
         self.login_checked: set[str] = set()
@@ -362,6 +363,8 @@ class AiExplorer:
     def _allow(self, host: str) -> None:
         if host not in self.allowed:
             self.allowed.append(host)
+            if self._tabs is not None:
+                self._tabs.allowed_domains_changed()
         self._save(allowed_hosts=list(self.allowed))
 
     def _act_on_element(
@@ -676,7 +679,7 @@ class AiExplorer:
         if not _same(answer, YES_HOST):
             return f"A navegação para {host} foi bloqueada. Siga sem ela."
         self._allow(host)
-        page.goto(url, wait_until="domcontentloaded")
+        goto_after_unblock(page, url)
         self._settle(page)
         return f"ok: {host} liberado e aberto."
 
@@ -798,6 +801,7 @@ class AiExplorer:
     def run(self) -> None:
         try:
             tabs = ItemTabs(self.browser, self.allowed, on_blocked=self.blocked.append)
+            self._tabs = tabs
         except PlaywrightError as error:
             # A extensão pode ter reiniciado sem o Playwright perceber: a ligação antiga não serve
             raise BrowserUnavailableError from error

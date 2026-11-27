@@ -147,7 +147,7 @@ def me(user: CurrentUser) -> UserResponse:
     dependencies=[Depends(limit_requests(30))],
 )
 def create_recording_session(user: CurrentUser) -> RecordingTokenResponse:
-    token, expires_at = create_recording_token(user.id)
+    token, expires_at = create_recording_token(user.id, user.tokens_valid_after)
     return RecordingTokenResponse(token=token, expires_at=expires_at)
 
 
@@ -166,7 +166,9 @@ def create_recording_session(user: CurrentUser) -> RecordingTokenResponse:
     dependencies=[Depends(limit_requests(10))],
 )
 def create_runner_session(user: CurrentUser) -> RunnerTokenResponse:
-    token, expires_at = create_runner_token(user.id, user.email)
+    token, expires_at = create_runner_token(
+        user.id, user.email, (user.tokens_valid_after, user.runner_tokens_valid_after)
+    )
     return RunnerTokenResponse(token=token, expires_at=expires_at)
 
 

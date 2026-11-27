@@ -51,7 +51,7 @@ Como funciona ([runner.js](runner.js)):
 - Mesmo nas abas do Ditto, a extensão recusa os comandos que o Ditto não usa e que dariam acesso além da página da tarefa: ler ou trocar cookies, mexer no armazenamento do navegador, listar ou abrir outras abas e comandos do navegador inteiro. As abas do Ditto só abrem endereços `http://` e `https://`. Se uma delas for parar num arquivo do computador ou numa página interna do Chrome, é fechada na hora.
 - Enquanto uma linha roda, o Chrome mostra a faixa "começou a depurar este navegador". Clicar em **Cancelar** nela para a linha. A aba da linha abre na frente de propósito: numa aba em segundo plano o Chrome para de desenhar a página e os cliques da tarefa travam.
 - Os downloads da linha passam pela sua pasta Downloads e são apagados de lá depois que o Ditto pega o arquivo. Só saem deste Chrome os downloads feitos pelas abas do Ditto. Os que você faz nas suas abas nunca são lidos nem apagados. Com o worker na mesma máquina, ele copia da pasta; com o worker na nuvem ou no Docker, a extensão baixa o mesmo endereço de novo, com as suas contas, e manda o conteúdo pela conexão (até 40 MB). Download gerado por envio de formulário (POST) não pode ser buscado de novo.
-- Precisa das permissões `debugger` (controlar as abas do Ditto) e `alarms` (tentar de novo quando o worker estava desligado).
+- Precisa das permissões `debugger` (controlar as abas do Ditto), `alarms` (tentar de novo quando o worker estava desligado) e `declarativeNetRequest` (o próprio Chrome barra a navegação das abas do Ditto para fora dos domínios da tarefa, sem cada pedido da página ir até o worker e voltar).
 
 ## Publicar com o Ditto na nuvem
 

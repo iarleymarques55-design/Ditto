@@ -15,6 +15,7 @@ São duas portas:
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import json
 import logging
 import re
@@ -109,11 +110,14 @@ class ExtensionRelay:
         allowed_origins: list[str] | None = None,
         local_downloads: bool = True,
         recheck_seconds: float = _RECHECK_SECONDS,
+        on_leave: Callable[[uuid.UUID], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self._authenticate = authenticate
         self._recheck_seconds = recheck_seconds
+        # Avisado quando a extensão de uma conta sai, para o painel não achar que ela está ligada
+        self._on_leave = on_leave
         # Vazio: qualquer extensão do Chrome pode tentar (o token ainda é exigido)
         self._allowed_origins = set(allowed_origins or [])
         # Worker e Chrome na mesma máquina: o arquivo baixado é copiado direto da pasta dele
@@ -143,6 +147,25 @@ class ExtensionRelay:
 
     def cdp_url_for(self, user_id: uuid.UUID) -> str:
         return f"ws://127.0.0.1:{self._cdp_port}/cdp/{self._secret}/{user_id}"
+
+    def set_allowed_domains(self, user_id: uuid.UUID, domains: list[str]) -> bool:
+        """Pede à extensão para barrar, ela mesma, a navegação das abas do Ditto para fora destes
+        domínios. Sem isso, cada pedido do site ia e voltava pelo worker antes de seguir: com o
+        worker na nuvem, uma viagem pela rede por imagem, script e chamada da página.
+
+        Falso quando a extensão é de uma versão que não sabe fazer isso: aí o worker filtra."""
+        link = self._links.get(user_id)
+        loop = self._loop
+        if link is None or loop is None:
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self._call_extension(link, "setAllowedDomains", domains=domains), loop
+        )
+        try:
+            future.result(timeout=_EXTENSION_TIMEOUT_SECONDS)
+        except (RelayError, TimeoutError, concurrent.futures.TimeoutError):
+            return False
+        return True
 
     def start(self) -> None:
         started = threading.Event()
@@ -308,6 +331,16 @@ class ExtensionRelay:
             if self._links.get(user_id) is link:
                 await self._drop(link, "A extensão desconectou.")
                 logger.info("Extensão desconectada: as execuções desta conta esperam na fila.")
+                await self._notify_leave(user_id)
+
+    async def _notify_leave(self, user_id: uuid.UUID) -> None:
+        if self._on_leave is None:
+            return
+        try:
+            await asyncio.to_thread(self._on_leave, user_id)
+        except Exception:
+            # O banco pode ter caído por um instante: a marca vence sozinha em poucos minutos
+            logger.warning("Não consegui anotar que a extensão saiu.", exc_info=True)
 
     async def _drop(self, link: _Link, reason: str, code: int = 1000) -> None:
         if self._links.get(link.user_id) is link:

@@ -39,6 +39,9 @@ _TYPING_DELAY_MS = 10
 _QUIET_SECONDS = 0.5
 _SETTLE_MAX_SECONDS = 4
 _TRACKED_REQUESTS = {"document", "xhr", "fetch"}
+# Uma leitura aberta há mais que isso é o site "escutando" (Google Agenda, Gmail, chats), e não a
+# resposta à ação: esperar por ela fazia cada passo gastar o tempo máximo
+_BACKGROUND_READ_SECONDS = 1.0
 _LOGIN_MESSAGE = (
     "O site pediu login, e esta gravação não tem esse passo. A repetição começa sem a sua sessão: "
     "saia da conta no navegador e grave a tarefa de novo, começando pelo login."
@@ -158,6 +161,12 @@ def _timed(phase: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     return decorate
 
 
+def _address_of(url: str) -> str:
+    """O endereço sem a parte que muda a cada pedido (?rid=..., #...)."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
 class StepRunner:
     def __init__(
         self,
@@ -174,8 +183,13 @@ class StepRunner:
         self.before_irreversible = before_irreversible
         # Um download pode começar em uma janela nova, aberta pelo próprio clique
         self.downloads: list[Download] = []
-        # Pedidos em andamento: o site ainda pode estar buscando o que vai mostrar
-        self._pending_requests: set[Request] = set()
+        # Pedidos em andamento e quando começaram: o site ainda pode estar buscando o que vai mostrar
+        self._pending_requests: dict[Request, float] = {}
+        # Quando começou a última ação. O que o site já fazia antes dela não é resposta a ela
+        self._action_started = float("-inf")
+        # Endereços que o site já deixou abertos por mais de um segundo: quando ele os abre de
+        # novo, é a mesma escuta de fundo, e não a resposta a uma ação
+        self._background_reads: set[str] = set()
         self._last_action: StepAction | None = None
         # Segundos gastos em cada fase do passo atual. Só a fase de fora conta: uma espera dentro
         # de um clique entra no clique, sem contar duas vezes
@@ -187,10 +201,29 @@ class StepRunner:
 
     def _on_request(self, request: Request) -> None:
         if request.resource_type in _TRACKED_REQUESTS:
-            self._pending_requests.add(request)
+            self._pending_requests[request] = time.monotonic()
 
     def _on_request_done(self, request: Request) -> None:
-        self._pending_requests.discard(request)
+        self._pending_requests.pop(request, None)
+
+    def _mark_action(self) -> None:
+        self._action_started = time.monotonic()
+
+    def _waiting_for_site(self) -> bool:
+        """O site ainda responde à última ação? Conta o que começou depois dela. Uma leitura que
+        passa de um segundo aberta é conexão de fundo; um envio (salvar, enviar) conta até o fim."""
+        now = time.monotonic()
+        waiting = False
+        for request, started in self._pending_requests.items():
+            if request.method == "GET":
+                address = _address_of(request.url)
+                if now - started > _BACKGROUND_READ_SECONDS:
+                    self._background_reads.add(address)
+                if address in self._background_reads:
+                    continue
+            if started >= self._action_started:
+                waiting = True
+        return waiting
 
     def _watch(self, page: Page) -> None:
         page.on("request", self._on_request)
@@ -353,6 +386,7 @@ class StepRunner:
 
         before = self._state_before(plan)
         try:
+            self._mark_action()
             self.page.goto(plan.url, wait_until="domcontentloaded")
         except PlaywrightError:
             return StepOutcome("failed", message="O portal não abriu ou o endereço foi bloqueado.")
@@ -531,6 +565,7 @@ class StepRunner:
 
     def _click(self, element: Locator) -> bool:
         try:
+            self._mark_action()
             element.click()
             self._settle()
             return True
@@ -542,13 +577,14 @@ class StepRunner:
         """A pós-condição é quem decide se o passo deu certo: aqui só se decide quanto esperar."""
         postcondition.wait_until_quiet(
             self.page,
-            busy=lambda: bool(self._pending_requests),
+            busy=self._waiting_for_site,
             quiet_seconds=_QUIET_SECONDS,
             max_seconds=_SETTLE_MAX_SECONDS,
         )
 
     @_timed("act")
     def _act(self, element: Locator, plan: StepPlan) -> None:
+        self._mark_action()
         if plan.action == StepAction.CLICK:
             element.click()
         elif plan.action == StepAction.FILL:
@@ -618,6 +654,7 @@ class StepRunner:
                     f"perderia. A linha parou: {plan.intent}."
                 )
                 return StepOutcome("failed", message=message, diagnostics=self._focus_report())
+            self._mark_action()
             if key:
                 self.page.keyboard.press(key)
             else:

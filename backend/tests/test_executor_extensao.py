@@ -16,7 +16,8 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from playwright.sync_api import BrowserContext, Playwright, Worker
+from playwright.sync_api import Browser, BrowserContext, Playwright, Worker
+from playwright.sync_api import Error as PlaywrightError
 from sqlalchemy.orm import Session, sessionmaker
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
@@ -25,7 +26,12 @@ from app.core.config import BACKEND_DIR, Settings
 from app.core.exceptions import UnauthorizedError
 from app.models.user import User
 from app.services.auth_service import AuthService
-from app.services.engine.browser import connect_user_browser
+from app.services.engine.browser import (
+    ItemTabs,
+    connect_user_browser,
+    goto_after_unblock,
+    set_domain_filter,
+)
 from app.services.engine.extension_relay import ExtensionRelay
 from app.services.worker_tasks import process_next_run
 from tests.fixtures.portal import Portal
@@ -277,6 +283,7 @@ def test_rele_aberto_para_a_rede_exige_a_lista_de_extensoes() -> None:
         Settings(extension_runner_port=8765, extension_relay_host="0.0.0.0")
     publico = Settings(
         environment="production",
+        bcrypt_rounds=12,
         allow_private_networks=False,
         extension_runner_port=8765,
         extension_relay_host="0.0.0.0",
@@ -484,3 +491,94 @@ def test_trocar_a_senha_derruba_o_chrome_ligado(
         if chrome is not None:
             chrome.fechar()
         relay.stop()
+
+
+# ─── Filtro de domínios dentro da extensão ────────────────────────────────────
+# Antes, cada pedido da página ia até o worker e voltava antes de seguir. Com o worker na nuvem,
+# isso deixava a tarefa umas 4 vezes mais lenta. Agora quem barra é o Chrome, por uma regra da
+# extensão que vale só para as abas do Ditto.
+
+
+def _ligar_com_filtro(
+    api: TestClient,
+    autenticado: Cabecalho,
+    playwright_teste: Playwright,
+    rele: ExtensionRelay,
+    service_worker: Worker,
+) -> tuple[Browser, uuid.UUID]:
+    ligar(api, autenticado, service_worker)
+    dono = esperar(lambda: rele.connected_users() and rele.connected_users()[0])
+    esperar(lambda: service_worker.evaluate("statusDoExecutor()") == "conectado")
+    navegador = connect_user_browser(playwright_teste, rele.cdp_url_for(dono))
+    set_domain_filter(navegador, lambda dominios: rele.set_allowed_domains(dono, dominios))
+    return navegador, dono
+
+
+def test_extensao_barra_a_navegacao_para_fora_da_tarefa(
+    api: TestClient,
+    autenticado: Cabecalho,
+    portal: Portal,
+    playwright_teste: Playwright,
+    rele: ExtensionRelay,
+    chrome_da_pessoa: tuple[BrowserContext, Worker],
+) -> None:
+    contexto, service_worker = chrome_da_pessoa
+    aba_da_pessoa = contexto.pages[0] if contexto.pages else contexto.new_page()
+    navegador, _dono = _ligar_com_filtro(api, autenticado, playwright_teste, rele, service_worker)
+    barrados: list[str] = []
+    try:
+        permitidos = ["localhost"]
+        abas = ItemTabs(navegador, permitidos, on_blocked=barrados.append)
+        # Quem filtra é a extensão, e não um desvio de cada pedido pelo worker
+        assert abas._filtered_by_extension
+        pagina = abas.current
+
+        pagina.goto(f"{portal.url}/relatorios")
+        assert pagina.url.startswith(portal.url)
+
+        fora = portal.url.replace("localhost", "127.0.0.1") + "/relatorios"
+        with pytest.raises(PlaywrightError, match="ERR_BLOCKED_BY_CLIENT"):
+            pagina.goto(fora)
+        esperar(lambda: barrados == [fora])
+
+        # Liberado no meio (como no Criar com IA), o domínio passa a abrir
+        permitidos.append("127.0.0.1")
+        abas.allowed_domains_changed()
+        goto_after_unblock(pagina, fora)
+        assert pagina.url == fora
+
+        # A aba da própria pessoa nunca é filtrada
+        aba_da_pessoa.goto(fora)
+        abas.close()
+        # Sem abas do Ditto, a regra sai
+        esperar(
+            lambda: (
+                service_worker.evaluate(
+                    "chrome.declarativeNetRequest.getSessionRules().then((regras) => regras.length)"
+                )
+                == 0
+            )
+        )
+    finally:
+        navegador.close()
+
+
+def test_execucao_completa_com_o_filtro_na_extensao(
+    api: TestClient,
+    autenticado: Cabecalho,
+    tarefa_ativa: dict[str, Any],
+    fabrica_sessao: sessionmaker[Session],
+    playwright_teste: Playwright,
+    rele: ExtensionRelay,
+    chrome_da_pessoa: tuple[BrowserContext, Worker],
+) -> None:
+    _contexto, service_worker = chrome_da_pessoa
+    navegador, dono = _ligar_com_filtro(api, autenticado, playwright_teste, rele, service_worker)
+    try:
+        run_id = disparar(api, tarefa_ativa, autenticado)
+        assert process_next_run(fabrica_sessao, navegador, owner_id=dono) is True
+        execucao = ver(api, run_id, autenticado)
+        assert execucao["status"] == "succeeded", execucao
+        assert situacoes(execucao) == ["succeeded"] * 3
+    finally:
+        navegador.close()

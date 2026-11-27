@@ -381,6 +381,7 @@ Tudo vem do ambiente, lido em [config.py](app/core/config.py). Sem os segredos o
 | `DATABASE_URL` | Conexão com o PostgreSQL | Sim |
 | `JWT_SECRET` | Assinatura dos tokens, com pelo menos 32 caracteres | Sim |
 | `FERNET_KEYS` | Chaves das credenciais, da mais nova para a mais antiga | Sim |
+| `BCRYPT_ROUNDS` | Custo do hash das senhas (padrão 12; em produção, nunca menos que 12) | Não |
 | `TEST_DATABASE_URL` | Banco dos testes | Só para testar |
 | `ENVIRONMENT`, `CORS_ORIGINS` | Ambiente e origens permitidas | Não |
 | `GOOGLE_CLIENT_ID` | Login com Google | Não |

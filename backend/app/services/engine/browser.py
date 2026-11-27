@@ -73,6 +73,27 @@ def launch_browser(playwright: Playwright, proxy: EgressProxy | None = None) -> 
 # Navegadores que são o Chrome da pessoa: neles o Ditto só abre e fecha as próprias abas
 _user_browsers: "weakref.WeakSet[Browser]" = weakref.WeakSet()
 
+# Recebe os domínios da tarefa e diz se a extensão passou a barrar a navegação para fora deles
+DomainFilter = Callable[[list[str]], bool]
+_domain_filters: "weakref.WeakKeyDictionary[Browser, DomainFilter]" = weakref.WeakKeyDictionary()
+
+
+def set_domain_filter(browser: Browser, domain_filter: DomainFilter) -> None:
+    """No Chrome da pessoa, a extensão pode filtrar a navegação sozinha (veja ItemTabs)."""
+    _domain_filters[browser] = domain_filter
+
+
+def _rule_domains(domains: list[str]) -> list[str] | None:
+    """Os domínios no formato que o Chrome aceita numa regra (minúsculas, acentos em punycode).
+    None se algum não puder ser convertido: aí o filtro fica com o worker."""
+    converted = []
+    for domain in domains:
+        try:
+            converted.append(domain.strip().lower().encode("idna").decode("ascii"))
+        except UnicodeError:
+            return None
+    return converted
+
 
 def connect_user_browser(playwright: Playwright, cdp_url: str) -> Browser:
     """Usa o Chrome da pessoa, com as contas logadas nele, pelo relé da extensão
@@ -88,6 +109,30 @@ def connect_user_browser(playwright: Playwright, cdp_url: str) -> Browser:
 
 def is_user_browser(browser: Browser) -> bool:
     return browser in _user_browsers
+
+
+_UNBLOCK_ATTEMPTS = 3
+
+
+def goto_after_unblock(page: Page, url: str) -> None:
+    """Abre um endereço que acabou de ser liberado. A navegação barrada antes deixa a página de
+    erro do Chrome chegando um instante depois, e ela pode atropelar esta (ou a tentativa
+    anterior chega depois da seguinte): espera assentar e só tenta de novo se não chegou lá."""
+    for attempt in range(_UNBLOCK_ATTEMPTS):
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            return
+        except PlaywrightError as error:
+            if "interrupted by another navigation" not in str(error):
+                raise
+            if attempt == _UNBLOCK_ATTEMPTS - 1:
+                raise
+        try:
+            page.wait_for_load_state("domcontentloaded")
+        except PlaywrightError:
+            pass
+        if page.url == url:
+            return
 
 
 def _guard(
@@ -138,7 +183,11 @@ class ItemTabs:
         self._on_blocked = on_blocked
         self._pages: list[Page] = []
         self._context: BrowserContext | None = None
+        self._domain_filter = _domain_filters.get(browser)
+        self._filtered_by_extension = False
         if is_user_browser(browser):
+            # Antes de abrir a aba: a regra já vale para a primeira navegação
+            self._filtered_by_extension = self._send_domains()
             self._adopt(browser.contexts[0].new_page())
         else:
             self._context = new_guarded_context(browser, allowed_domains, on_blocked)
@@ -151,10 +200,40 @@ class ItemTabs:
         open_pages = [page for page in self._pages if not page.is_closed()]
         return open_pages[-1] if open_pages else self._pages[0]
 
+    def _send_domains(self) -> bool:
+        if self._domain_filter is None:
+            return False
+        domains = _rule_domains(self._allowed_domains)
+        return domains is not None and self._domain_filter(domains)
+
+    def allowed_domains_changed(self) -> None:
+        """Quem criou liberou um domínio novo no meio: a regra da extensão precisa saber."""
+        if self._filtered_by_extension and not self._send_domains():
+            # A extensão parou de aceitar: o worker volta a filtrar nas abas abertas
+            self._filtered_by_extension = False
+            for page in self._pages:
+                if not page.is_closed():
+                    self._route_through_worker(page)
+
+    def _route_through_worker(self, page: Page) -> None:
+        page.route("**/*", lambda route: _guard(route, self._allowed_domains, self._on_blocked))
+
+    def _on_failed_request(self, request: Request) -> None:
+        """Com o filtro na extensão, a navegação barrada chega aqui como pedido recusado."""
+        if (
+            self._on_blocked is not None
+            and _is_top_level_navigation(request)
+            and "ERR_BLOCKED_BY_CLIENT" in (request.failure or "")
+        ):
+            self._on_blocked(request.url)
+
     def _adopt(self, page: Page) -> None:
         # O filtro fica na aba, e não no Chrome inteiro, para não tocar nas abas da pessoa
         page.set_default_timeout(settings.step_timeout_ms)
-        page.route("**/*", lambda route: _guard(route, self._allowed_domains, self._on_blocked))
+        if self._filtered_by_extension:
+            page.on("requestfailed", self._on_failed_request)
+        else:
+            self._route_through_worker(page)
         page.on("dialog", _answer_dialog)
         page.on("popup", self._adopt)
         self._pages.append(page)

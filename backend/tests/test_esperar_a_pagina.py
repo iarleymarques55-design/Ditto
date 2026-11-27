@@ -1,11 +1,14 @@
 """A espera entre os passos: segura até a página parar, sem fotografá-la várias vezes."""
 
+import threading
 import time
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from playwright.sync_api import Browser, Page
 
+from app.services.engine.executor import StepRunner
 from app.services.engine.postcondition import wait_until_quiet
 
 QUIETO = 0.5
@@ -105,3 +108,81 @@ def test_nao_le_o_texto_da_pagina(pagina: Page) -> None:
     _esperar(pagina)
 
     assert pagina.evaluate("window.__lido") is False
+
+
+# ─── Conexões de fundo do site ────────────────────────────────────────────────
+# Google Agenda, Gmail e chats deixam uma leitura sempre aberta, "escutando" novidades. Antes,
+# cada passo esperava o máximo por ela: a mesma tarefa de 12 passos ia de 7,5 s para 39 s.
+
+
+_PAGINAS = {
+    "/escuta": (
+        "<p id='p'>antes</p><script>"
+        "const escutar = () => fetch('/escutar').catch(() => {});"
+        "escutar(); setInterval(escutar, 300)</script>"
+    ),
+    "/salva": "<p id='p'>Salvando</p>",
+}
+
+
+class _SiteQueEscuta(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        pagina = _PAGINAS.get(self.path)
+        if pagina is None:
+            # A leitura que o site deixa aberta, esperando novidade
+            time.sleep(30)
+            return
+        corpo = pagina.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def do_POST(self) -> None:
+        time.sleep(1.5)
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def site_que_escuta() -> Iterator[str]:
+    servidor = ThreadingHTTPServer(("127.0.0.1", 0), _SiteQueEscuta)
+    servidor.daemon_threads = True
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    yield f"http://localhost:{servidor.server_address[1]}"
+    servidor.shutdown()
+
+
+def _esperar_depois_da_acao(runner: StepRunner, acao: str) -> float:
+    inicio = time.monotonic()
+    runner._mark_action()
+    runner.page.evaluate(acao)
+    runner._settle()
+    return time.monotonic() - inicio
+
+
+def test_leitura_sempre_aberta_nao_segura_o_passo(pagina: Page, site_que_escuta: str) -> None:
+    runner = StepRunner(pagina)
+    pagina.goto(f"{site_que_escuta}/escuta")
+
+    gasto = _esperar_depois_da_acao(runner, "p.textContent = 'depois'")
+
+    # Sem a regra, ficava no máximo (4 s) em todo passo
+    assert gasto < 2.5
+
+
+def test_envio_disparado_pela_acao_ainda_e_esperado(pagina: Page, site_que_escuta: str) -> None:
+    runner = StepRunner(pagina)
+    pagina.goto(f"{site_que_escuta}/salva")
+
+    _esperar_depois_da_acao(
+        runner,
+        "fetch('/salvar', {method: 'POST'}).then(() => p.textContent = 'Salvo').catch(() => {})",
+    )
+
+    # O salvamento demora 1,5 s e é a resposta à ação: a espera não pode largar antes
+    assert pagina.text_content("#p") == "Salvo"

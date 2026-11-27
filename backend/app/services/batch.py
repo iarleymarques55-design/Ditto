@@ -1,7 +1,7 @@
 import csv
 import io
 import unicodedata
-from xml.etree.ElementTree import ParseError
+from xml.etree.ElementTree import ParseError  # nosec B405: só o tipo do erro; a leitura usa defusedxml
 from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook

@@ -82,6 +82,43 @@ const downloadsDoDitto = new Set()
 
 const salvarAbas = () => chrome.storage.session.set({ [CHAVE_ABAS]: [...abasDoDitto] }).catch(() => {})
 
+// ─── Filtro de domínios ──────────────────────────────────────────────────
+// A aba do Ditto só navega pelos domínios da tarefa. Quem barra é o próprio Chrome, com uma regra
+// que vale só para as abas do Ditto: antes, cada pedido da página (imagem, script, chamada) ia até o
+// worker e voltava antes de seguir, e com o worker na nuvem isso deixava cada passo muito mais lento.
+// null: o worker ainda não mandou a lista (ou é uma versão antiga dele, que filtra por conta própria).
+const REGRA_DOMINIOS = 1
+const MAXIMO_DOMINIOS = 200
+const DOMINIO_VALIDO = /^[a-z0-9.-]{1,253}$/
+let dominiosPermitidos = null
+
+async function aplicarFiltroDeDominios() {
+  const abas = [...abasDoDitto]
+  const remover = { removeRuleIds: [REGRA_DOMINIOS] }
+  if (dominiosPermitidos === null || abas.length === 0) {
+    await chrome.declarativeNetRequest.updateSessionRules(remover)
+    return
+  }
+  const condicao = { resourceTypes: ['main_frame'], tabIds: abas }
+  // Sem nenhum domínio liberado, nada passa
+  if (dominiosPermitidos.length) condicao.excludedRequestDomains = dominiosPermitidos
+  await chrome.declarativeNetRequest.updateSessionRules({
+    ...remover,
+    addRules: [{ id: REGRA_DOMINIOS, priority: 1, action: { type: 'block' }, condition: condicao }],
+  })
+}
+
+function definirDominios(dominios) {
+  if (!Array.isArray(dominios) || dominios.length > MAXIMO_DOMINIOS) throw new Error('Lista de domínios inválida.')
+  if (!dominios.every((dominio) => typeof dominio === 'string' && DOMINIO_VALIDO.test(dominio))) {
+    throw new Error('Lista de domínios inválida.')
+  }
+  dominiosPermitidos = [...new Set(dominios)]
+  return aplicarFiltroDeDominios()
+}
+
+const atualizarFiltro = () => aplicarFiltroDeDominios().catch(() => {})
+
 function statusDoExecutor() {
   return estadoExecutor
 }
@@ -280,6 +317,8 @@ async function adotar(tabId) {
   await chrome.debugger.attach({ tabId }, '1.3')
   abasDoDitto.add(tabId)
   await salvarAbas()
+  // A regra passa a valer para a aba nova antes de o worker mandar navegar
+  await aplicarFiltroDeDominios()
   const { targetInfo } = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
   return { tabId, targetInfo }
 }
@@ -328,6 +367,9 @@ async function executar(metodo, params) {
       return {}
     case 'detachAll':
       soltarTodas()
+      return {}
+    case 'setAllowedDomains':
+      await definirDominios(params.domains)
       return {}
     default:
       throw new Error(`Comando desconhecido: ${metodo}`)
@@ -424,6 +466,8 @@ function soltarTodas() {
   for (const tabId of abasDoDitto) chrome.debugger.detach({ tabId }).catch(() => {})
   abasDoDitto.clear()
   salvarAbas()
+  dominiosPermitidos = null
+  atualizarFiltro()
 }
 
 // ─── Eventos do Chrome ───────────────────────────────────────────────────
@@ -438,12 +482,14 @@ chrome.debugger.onEvent.addListener((origem, method, params) => {
 chrome.debugger.onDetach.addListener((origem) => {
   if (!abasDoDitto.delete(origem.tabId)) return
   salvarAbas()
+  atualizarFiltro()
   enviarAoRele({ event: 'tabDetached', tabId: origem.tabId })
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (!abasDoDitto.delete(tabId)) return
   salvarAbas()
+  atualizarFiltro()
   enviarAoRele({ event: 'tabDetached', tabId })
 })
 
@@ -470,6 +516,8 @@ async function iniciarExecutor() {
   const { [CHAVE_ABAS]: antigas = [] } = await chrome.storage.session.get(CHAVE_ABAS)
   for (const tabId of antigas) chrome.debugger.detach({ tabId }).catch(() => {})
   await chrome.storage.session.remove(CHAVE_ABAS)
+  // Uma regra de antes do reinício não pode ficar valendo para abas que já não são do Ditto
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [REGRA_DOMINIOS] }).catch(() => {})
   conectarExecutor()
 }
 

@@ -65,10 +65,11 @@ def test_limite_passageiro_espera_e_tenta_de_novo(
 def test_limite_que_continua_vira_indisponivel_sem_insistir(
     esperas: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pedidos = responder_com(monkeypatch, [resposta(429), resposta(429)])
+    pedidos = responder_com(monkeypatch, [resposta(429), resposta(429), resposta(429)])
     with pytest.raises(LlmUnavailableError):
         LlmClient().chat_json("s", "u")
-    assert len(pedidos) == 2
+    # Três tentativas no total, e não para sempre
+    assert len(pedidos) == 3
 
 
 def test_espera_longa_tem_teto(esperas: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,6 +90,36 @@ def test_retry_after_invalido_usa_o_padrao(
     )
     LlmClient().chat_json("s", "u")
     assert esperas == [2.0]
+
+
+def test_espera_o_limite_de_tokens_que_o_groq_informa(
+    esperas: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pedidos = responder_com(
+        monkeypatch,
+        [
+            resposta(429, cabecalhos={"x-ratelimit-reset-tokens": "7.66s"}),
+            resposta(429, cabecalhos={"x-ratelimit-reset-tokens": "1m2s"}),
+            resposta(200, conteudo("{}")),
+        ],
+    )
+    LlmClient().chat_json("s", "u")
+    # A segunda espera (62 s) passa do teto de cada espera e do teto somado
+    assert esperas == [7.66, 20.0]
+    assert len(pedidos) == 3
+
+
+def test_esperas_somadas_tem_teto(esperas: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
+    responder_com(
+        monkeypatch,
+        [
+            resposta(429, cabecalhos={"retry-after": "18"}),
+            resposta(429, cabecalhos={"retry-after": "18"}),
+            resposta(200, conteudo("{}")),
+        ],
+    )
+    LlmClient().chat_json("s", "u")
+    assert esperas == [18.0, 12.0]
 
 
 def test_outros_erros_nao_repetem(esperas: list[float], monkeypatch: pytest.MonkeyPatch) -> None:
