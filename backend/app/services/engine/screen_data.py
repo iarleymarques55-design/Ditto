@@ -7,7 +7,9 @@ from typing import Any
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame, Page
 
-from app.services.engine.snapshot import MARKER_ATTRIBUTE
+from app.services.engine import snapshot
+from app.services.engine.postcondition import _PAGE_FINGERPRINT
+from app.services.engine.snapshot import MARKER_ATTRIBUTE, PageElement
 
 MAX_ITEMS = 40
 MAX_OPTIONS = 25
@@ -58,7 +60,9 @@ _COLLECT_DATA = """
     if (items.length >= maxItems) break;
     if (leaf.children.length || !visible(leaf) || !inContent(leaf)) continue;
     const match = /^([^:]{1,60}):\\s*(.{1,300})$/.exec(clean(leaf.innerText));
-    if (!match) continue;
+    // "Reunião 10:30" é um horário, e não o par "Reunião 10" = "30". Numa agenda, esses pares
+    // falsos enchiam o pacote da IA e tiravam dele os botões dos dias
+    if (!match || (/\\d$/.test(match[1]) && /^\\d/.test(match[2]))) continue;
     const anchor = match[1].trim();
     const key = 'inline|' + anchor;
     if (seen.has(key)) continue;
@@ -143,6 +147,97 @@ def visible_text(page: Page, max_chars: int = 1500) -> str:
             parts.append(text)
             room -= len(text) + 1
     return "\n".join(parts)[:max_chars]
+
+
+MAX_SCREEN_CHARS = 1500
+
+# Tudo o que a IA precisa saber de um quadro, numa pergunta só: com o Chrome no computador da
+# pessoa, cada pergunta atravessa a rede, e eram seis por quadro a cada passo. Iframe escondido
+# (anúncio, chat, contador) volta vazio sem ser lido
+_READ_FRAME = (
+    "([maxItems, maxOptions, maxChars, marker]) => {\n"
+    "  const isMain = window === window.top;\n"
+    "  if (!isMain && (window.innerWidth < 2 || window.innerHeight < 2)) return null;\n"
+    "  const collectElements = " + snapshot._COLLECT_ELEMENTS.strip() + ";\n"
+    "  const elements = collectElements();\n"
+    "  const shown = (el) => { const r = el.getBoundingClientRect();"
+    " return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };\n"
+    "  return {\n"
+    "    elements,\n"
+    "    options: (" + _SELECT_OPTIONS.strip() + ")([marker, maxOptions]),\n"
+    "    data: (" + _COLLECT_DATA.strip() + ")([maxItems]),\n"
+    "    text: (" + _VISIBLE_TEXT.strip() + ")([maxChars]),\n"
+    "    captcha: isMain && (" + snapshot._HAS_CAPTCHA.strip() + ")(),\n"
+    "    password: isMain && [...document.querySelectorAll('input[type=password]')].some(shown),\n"
+    "    spreadsheet: document.querySelectorAll('#FormulaBar-NameBox-input').length === 1,\n"
+    "    title: isMain ? document.title : '',\n"
+    "    fingerprint: (" + _PAGE_FINGERPRINT.strip() + ")(),\n"
+    "  };\n"
+    "}"
+)
+
+
+@dataclass
+class PageReading:
+    """A tela inteira (página e iframes) como a IA a vê, lida de uma vez."""
+
+    elements: list[PageElement] = field(default_factory=list)
+    # Onde está cada elemento: o quadro e o número local da marca
+    places: dict[int, tuple[Frame, int]] = field(default_factory=dict)
+    options: dict[int, list[str]] = field(default_factory=dict)
+    data: list[ScreenData] = field(default_factory=list)
+    text: str = ""
+    title: str = ""
+    captcha: bool = False
+    login_form: bool = False
+    spreadsheet: bool = False
+    # No mesmo formato de postcondition.capture_state: dá para comparar com uma leitura depois
+    fingerprint: str = ""
+
+
+def read_page(page: Page) -> PageReading:
+    reading = PageReading()
+    fingerprints = [str(len(page.context.pages))]
+    texts: list[str] = []
+    room = MAX_SCREEN_CHARS
+    data: list[dict[str, Any]] = []
+    for frame in page.frames:
+        try:
+            raw = frame.evaluate(
+                _READ_FRAME, [MAX_ITEMS, MAX_OPTIONS, MAX_SCREEN_CHARS, MARKER_ATTRIBUTE]
+            )
+        except PlaywrightError:
+            # Quadro que navegou ou fechou no meio da leitura
+            fingerprints.append("")
+            continue
+        if raw is None:
+            fingerprints.append("")
+            continue
+        fingerprints.append(raw["fingerprint"])
+        if frame == page.main_frame:
+            reading.title = raw["title"]
+            reading.captcha = bool(raw["captcha"])
+            reading.login_form = bool(raw["password"])
+        reading.spreadsheet = reading.spreadsheet or bool(raw["spreadsheet"])
+        local_options = {item["index"]: item["options"] for item in raw["options"]}
+        for item in raw["elements"]:
+            if len(reading.elements) >= snapshot.MAX_ELEMENTS_ALL_FRAMES:
+                break
+            local = item["index"]
+            element = PageElement(**{**item, "index": len(reading.elements)})
+            reading.elements.append(element)
+            reading.places[element.index] = (frame, local)
+            if local in local_options:
+                reading.options[element.index] = local_options[local]
+        data.extend(raw["data"])
+        if room > 0 and raw["text"]:
+            piece = raw["text"][:room]
+            texts.append(piece)
+            room -= len(piece) + 1
+    reading.data = [ScreenData(index=index, **item) for index, item in enumerate(data[:MAX_ITEMS])]
+    reading.text = "\n".join(texts)[:MAX_SCREEN_CHARS]
+    reading.fingerprint = "#".join(fingerprints)
+    return reading
 
 
 def select_options(frame: Page | Frame) -> dict[int, list[str]]:

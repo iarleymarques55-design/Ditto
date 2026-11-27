@@ -59,7 +59,7 @@ class IaDeRoteiro:
 def elemento(texto: str) -> Callable[[dict[str, Any]], int]:
     def achar(dados: dict[str, Any]) -> int:
         for item in dados["elementos_da_pagina"]:
-            if texto in (item["texto"], item["rotulo"]):
+            if texto in (item.get("texto", ""), item.get("rotulo", "")):
                 return item["indice"]
         raise AssertionError(f"{texto} não está na página")
 
@@ -733,14 +733,17 @@ def test_ia_acha_a_caixa_de_mensagem_de_um_chat_sem_perguntar(
     assert len(perguntas) == 1
     assert "pode não ter volta" in perguntas[0]
     primeiro = ia.pedidos[0]["elementos_da_pagina"]
-    caixa = next(item for item in primeiro if item["rotulo"] == "Mensagem")
+    caixa = next(item for item in primeiro if item.get("rotulo", "") == "Mensagem")
     # Editor aparece como campo, com a dica de texto, mesmo com 220 links na barra lateral
     assert caixa["papel"] == "textbox"
-    assert caixa["dica"] == "Como posso ajudar?"
-    assert any(item["texto"] == "Enviar" for item in primeiro)
+    assert caixa.get("dica", "") == "Como posso ajudar?"
+    assert any(item.get("texto", "") == "Enviar" for item in primeiro)
     # O que foi escrito no editor nunca vai para a IA como texto do elemento
     segundo = ia.pedidos[1]["elementos_da_pagina"]
-    assert next(item for item in segundo if item["rotulo"] == "Mensagem")["texto"] == ""
+    assert (
+        next(item for item in segundo if item.get("rotulo", "") == "Mensagem").get("texto", "")
+        == ""
+    )
     assert "Resposta: frutas doces" in ia.pedidos[2]["texto_da_tela"]
     assert rascunho.steps[1]["action"] == "fill"
 
@@ -782,7 +785,7 @@ def na_pergunta(
 
     def achar(dados: dict[str, Any]) -> dict[str, Any]:
         for item in dados["elementos_da_pagina"]:
-            if item["rotulo"] == rotulo and item.get("pergunta") == pergunta:
+            if item.get("rotulo", "") == rotulo and item.get("pergunta") == pergunta:
                 return {**decisao, "indice": item["indice"]}
         raise AssertionError(f"{rotulo} de {pergunta} não está na página")
 
@@ -812,11 +815,13 @@ def test_ia_ve_o_nome_de_cada_pergunta_do_google_forms(
     rodar(fabrica_sessao, navegador, dono, ia)
 
     elementos = ia.pedidos[0]["elementos_da_pagina"]
-    rotulos = {item["rotulo"] for item in elementos if item["papel"] == "textbox"}
+    rotulos = {item.get("rotulo", "") for item in elementos if item["papel"] == "textbox"}
     # O nome vem do título da pergunta, sem o asterisco de obrigatória
     assert {"Nome completo", "E-mail", "Data da visita"} <= rotulos
     opcoes = {
-        (item.get("pergunta"), item["rotulo"]) for item in elementos if item["papel"] == "radio"
+        (item.get("pergunta"), item.get("rotulo", ""))
+        for item in elementos
+        if item["papel"] == "radio"
     }
     assert opcoes == {
         ("Você já é cliente?", "Sim"),
@@ -825,13 +830,15 @@ def test_ia_ve_o_nome_de_cada_pergunta_do_google_forms(
         ("Quer receber novidades?", "Não"),
     }
     caixas = {
-        (item.get("pergunta"), item["rotulo"]) for item in elementos if item["papel"] == "checkbox"
+        (item.get("pergunta"), item.get("rotulo", ""))
+        for item in elementos
+        if item["papel"] == "checkbox"
     }
     assert caixas == {("Interesses", "Planilhas"), ("Interesses", "Relatórios")}
     lista = next(item for item in elementos if item["papel"] == "listbox")
-    assert lista["rotulo"] == "Estado"
+    assert lista.get("rotulo", "") == "Estado"
     # A opção escolhida é valor de campo: não vai para a IA como texto da lista
-    assert lista["texto"] == ""
+    assert lista.get("texto", "") == ""
     assert lista["opcoes"] == ["São Paulo", "Bahia"]
 
 
