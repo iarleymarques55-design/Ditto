@@ -240,14 +240,19 @@ def _explorer_json(
         "dados_ja_guardados": [_short(item, protected) for item in captured],
         "passos_que_ainda_cabem": steps_left,
         "elementos_da_pagina": [
-            {
-                "indice": element.index,
-                "papel": element.role,
-                "tag": element.tag,
-                "texto": _short(element.text, protected),
-                "rotulo": _short(element.label, protected),
-                "dica": _short(element.placeholder, protected),
-                "tipo": element.input_type,
+            _without_empty(
+                {
+                    "indice": element.index,
+                    "papel": element.role,
+                    # A tag só diz algo quando difere do papel ("textbox" num "div")
+                    "tag": element.tag if element.tag != element.role else "",
+                    "texto": _short(element.text, protected),
+                    "rotulo": _short(element.label, protected),
+                    "dica": _short(element.placeholder, protected),
+                    "tipo": element.input_type,
+                }
+            )
+            | {
                 **({"no_menu": True} if element.in_menu else {}),
                 **({"pergunta": _short(element.group, protected)} if element.group else {}),
                 **(
@@ -278,4 +283,10 @@ def _explorer_json(
             for item in screen_data
         ],
     }
-    return json.dumps(data, ensure_ascii=False)
+    # Sem espaços entre os itens: numa página enorme, como uma agenda, cabem mais elementos
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _without_empty(item: dict[str, Any]) -> dict[str, Any]:
+    """Campo vazio só ocupa espaço: numa agenda, eram metade do pacote e tiravam dele os dias."""
+    return {key: value for key, value in item.items() if value != ""}

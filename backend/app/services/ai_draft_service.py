@@ -15,7 +15,13 @@ from app.core.exceptions import (
 from app.models.ai_draft import AiDraft
 from app.models.enums import AiDraftStatus
 from app.repositories.ai_draft_repository import OPEN_STATUSES, AiDraftRepository
-from app.schemas.ai_draft import AiDraftAnswer, AiDraftCreate, AiDraftResponse
+from app.schemas.ai_draft import (
+    AiDraftAnswer,
+    AiDraftCreate,
+    AiDraftEvent,
+    AiDraftQuestion,
+    AiDraftResponse,
+)
 from app.services import runner_presence
 
 MAX_LISTED = 20
@@ -30,8 +36,11 @@ def to_response(draft: AiDraft) -> AiDraftResponse:
         start_url=draft.start_url,
         name=draft.name,
         step_count=len(draft.steps or []),
-        events=(draft.events or [])[-MAX_EVENTS_SHOWN:],
-        question=draft.question,
+        # O banco guarda dicionários; a resposta da API declara o formato de cada um
+        events=[
+            AiDraftEvent.model_validate(event) for event in (draft.events or [])[-MAX_EVENTS_SHOWN:]
+        ],
+        question=AiDraftQuestion.model_validate(draft.question) if draft.question else None,
         error=draft.error,
         flow_id=draft.flow_id,
         created_at=draft.created_at,

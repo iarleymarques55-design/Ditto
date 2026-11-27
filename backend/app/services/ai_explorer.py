@@ -27,19 +27,8 @@ from app.services.engine import capture, postcondition
 from app.services.engine.browser import ItemTabs, goto_after_unblock, host_matches
 from app.services.engine.llm_explorer import ExplorerDecision, LlmExplorer
 from app.services.engine.safety import looks_irreversible
-from app.services.engine.screen_data import (
-    ScreenData,
-    collect_screen_data,
-    select_options,
-    visible_text,
-)
-from app.services.engine.snapshot import (
-    PageElement,
-    frame_locator_for,
-    has_captcha,
-    has_login_form,
-    take_snapshot_with_frames,
-)
+from app.services.engine.screen_data import PageReading, ScreenData, read_page
+from app.services.engine.snapshot import PageElement, frame_locator_for
 from app.services.flow_service import FlowService
 from app.services.run_lifecycle import HEARTBEAT_SECONDS
 from app.services.templating import slugify
@@ -168,6 +157,10 @@ class AiExplorer:
         self.capture_reminded = False
         # O texto da tela da última decisão: um valor tirado dele não veio da pessoa
         self.last_screen_text = ""
+        # Como a tela estava quando a IA decidiu: o clique é comparado com ela
+        self.last_fingerprint = ""
+        # A aba em que a última espera foi feita: um clique pode abrir outra
+        self.settled_page: Page | None = None
 
     # ---------- banco ----------
 
@@ -240,10 +233,14 @@ class AiExplorer:
     # ---------- navegador ----------
 
     def _settle(self, page: Page) -> None:
-        """Espera a página parar de mudar. Uma animação sem fim só custa o tempo máximo."""
+        """Espera a página parar de mudar. Uma animação sem fim só custa o tempo máximo.
+
+        Toda ação que mexe na página termina aqui. O começo do passo seguinte não espera de novo:
+        a espera dupla custava até o dobro do tempo em cada passo."""
         postcondition.wait_until_quiet(
             page, quiet_seconds=_QUIET_SECONDS, max_seconds=_SETTLE_MAX_SECONDS
         )
+        self.settled_page = page
 
     def _fingerprint(self, page: Page) -> str:
         try:
@@ -251,8 +248,11 @@ class AiExplorer:
         except PlaywrightError:
             return ""
 
-    def _click(self, page: Page, locator: Locator) -> tuple[Download | None, bool]:
-        """O arquivo baixado, se houver, e se a tela mudou depois do clique."""
+    def _click(
+        self, page: Page, locator: Locator, before: str | None = None
+    ) -> tuple[Download | None, bool]:
+        """O arquivo baixado, se houver, e se a tela mudou depois do clique. `before` é a tela
+        que a IA viu ao decidir: assim o Chrome não é lido de novo antes do clique."""
         downloads: list[Download] = []
 
         # O Playwright só aceita funções Python como ouvinte, e não métodos embutidos
@@ -261,7 +261,8 @@ class AiExplorer:
 
         page.on("download", on_download)
         try:
-            before = self._fingerprint(page)
+            if before is None:
+                before = self._fingerprint(page)
             locator.click()
             self._settle(page)
             changed = self._fingerprint(page) != before
@@ -379,7 +380,10 @@ class AiExplorer:
         value = (decision.valor or "").strip()
 
         if decision.acao == "clicar":
+            # Depois de uma pergunta, a tela que a IA viu pode já ter mudado sozinha
+            before: str | None = self.last_fingerprint
             if _icon_only_button(element):
+                before = None
                 answer = self._ask(
                     "Este botão não tem nome, só um ícone, e eu não sei o que ele faz. Posso clicar?",
                     [YES_CLICK, NO_CLICK],
@@ -387,13 +391,14 @@ class AiExplorer:
                 if not _same(answer, YES_CLICK):
                     return "A pessoa não quis esse clique. Procure um botão com nome."
             elif looks_irreversible(f"{element.text} {element.label} {element.name}"):
+                before = None
                 answer = self._ask(
                     f'O botão "{name}" pode não ter volta (pagar, enviar, excluir...). Posso clicar?',
                     [YES_CLICK, NO_CLICK],
                 )
                 if not _same(answer, YES_CLICK):
                     return "A pessoa não quis esse clique. Se o pedido já foi cumprido, conclua."
-            download, changed = self._click(page, locator)
+            download, changed = self._click(page, locator, before)
             step["action"] = StepAction.CLICK.value
             if download is not None:
                 extension = download.suggested_filename.rsplit(".", 1)[-1].lower()
@@ -466,7 +471,8 @@ class AiExplorer:
         """Listas que não são <select>, como as do Google Forms: abrir e clicar na opção. Ficam
         gravados os dois cliques, que o executor já sabe repetir."""
         name = _name_of(element)
-        self._click(page, locator)
+        locator.click()
+        self._settle(page)
         option = self._visible_option(page, locator, value)
         if option is None:
             page.keyboard.press("Escape")
@@ -683,8 +689,9 @@ class AiExplorer:
         self._settle(page)
         return f"ok: {host} liberado e aberto."
 
-    def _handle_obstacles(self, page: Page) -> str | None:
-        if has_captcha(page):
+    def _handle_obstacles(self, page: Page, reading: PageReading) -> str | None:
+        """Devolve o que dizer à IA quando a pessoa precisou agir na aba."""
+        if reading.captcha:
             answer = self._ask(
                 "Apareceu um desafio de segurança (CAPTCHA). Resolva na aba do Ditto e clique em "
                 f"{SOLVED}.",
@@ -696,7 +703,7 @@ class AiExplorer:
             return "A pessoa resolveu o desafio."
 
         address = page.url.split("?", 1)[0]
-        if has_login_form(page) and address not in self.login_checked:
+        if reading.login_form and address not in self.login_checked:
             self.login_checked.add(address)
             answer = self._ask(
                 "Esta página pede login. A IA não digita senhas: entre na sua conta na aba do "
@@ -711,54 +718,43 @@ class AiExplorer:
 
     # ---------- laço ----------
 
-    def _read_elements(self, page: Page) -> tuple[list[PageElement], dict[int, list[str]]]:
-        elements: list[PageElement] = []
-        options: dict[int, list[str]] = {}
-        frame_options: dict[Any, dict[int, list[str]]] = {}
-        self.locators = {}
-        for element, frame, local in take_snapshot_with_frames(page):
-            if frame not in frame_options:
-                frame_options[frame] = select_options(frame)
-            if local in frame_options[frame]:
-                options[element.index] = frame_options[frame][local]
-            self.locators[element.index] = frame_locator_for(frame, local)
-            elements.append(element)
-        return elements, options
-
-    def _read_screen(
-        self, page: Page
-    ) -> tuple[list[PageElement], dict[int, list[str]], list[ScreenData]]:
+    def _read_screen(self, page: Page) -> PageReading:
         """Uma tela vazia costuma estar carregando. Sem esta espera a IA concluía que não havia
         nada na página e desistia, ou perguntava à pessoa."""
         for attempt in range(_EMPTY_SCREEN_RETRIES + 1):
-            elements, options = self._read_elements(page)
-            data = collect_screen_data(page)
-            if elements or data or attempt == _EMPTY_SCREEN_RETRIES:
-                return elements, options, data
+            reading = read_page(page)
+            if reading.elements or reading.data or attempt == _EMPTY_SCREEN_RETRIES:
+                break
             self._check_open()
             page.wait_for_timeout(_EMPTY_SCREEN_WAIT_MS)
             self._settle(page)
-        return [], {}, []
+        self.locators = {
+            index: frame_locator_for(frame, local)
+            for index, (frame, local) in reading.places.items()
+        }
+        self.last_fingerprint = reading.fingerprint
+        return reading
 
-    def _decide(self, page: Page, last_result: str, steps_left: int) -> tuple:
-        elements, options, data = self._read_screen(page)
+    def _decide(
+        self, page: Page, reading: PageReading, last_result: str, steps_left: int
+    ) -> ExplorerDecision | None:
         payload = sanitizer.build_explorer_payload(
             prompt=self.draft.prompt,
             url=page.url,
-            title=page.title(),
+            title=reading.title,
             done=self.done,
             last_result=last_result,
             answers=self.answers,
             captured=sorted(self._capture_names()),
             steps_left=steps_left,
-            elements=elements,
-            options=options,
-            screen_data=data,
-            screen_text=self._remember_screen(visible_text(page)),
-            spreadsheet=self._spreadsheet_frame(page) is not None,
+            elements=reading.elements,
+            options=reading.options,
+            screen_data=reading.data,
+            screen_text=self._remember_screen(reading.text),
+            spreadsheet=reading.spreadsheet,
             questions_left=_MAX_AI_QUESTIONS - self.ai_questions,
         )
-        return self.llm.decide(payload), elements, data
+        return self.llm.decide(payload)
 
     def _remember_screen(self, text: str) -> str:
         self.last_screen_text = text
@@ -770,10 +766,17 @@ class AiExplorer:
         for steps_left in range(settings.ai_draft_max_steps, 0, -1):
             self._check_open()
             page = tabs.current
-            self._settle(page)
-            last_result = self._handle_blocked(page) or self._handle_obstacles(page) or last_result
+            if page is not self.settled_page:
+                # O clique abriu outra aba, que ainda pode estar carregando
+                self._settle(page)
+            last_result = self._handle_blocked(page) or last_result
+            reading = self._read_screen(page)
+            obstacle = self._handle_obstacles(page, reading)
+            if obstacle:
+                last_result = obstacle
+                reading = self._read_screen(page)
 
-            decision, elements, data = self._decide(page, last_result, steps_left)
+            decision = self._decide(page, reading, last_result, steps_left)
             if decision is None:
                 failures += 1
                 if failures >= _MAX_LLM_FAILURES:
@@ -783,7 +786,7 @@ class AiExplorer:
                 last_result = "erro: sua resposta anterior veio fora do formato JSON combinado."
                 continue
             failures = 0
-            result = self._apply(page, decision, elements, data)
+            result = self._apply(page, decision, reading.elements, reading.data)
             if result is _DONE:
                 return
             last_result = str(result)

@@ -25,6 +25,8 @@ VERIFIABLE_TYPES = {DOWNLOAD, URL_CONTAINS, TEXT_VISIBLE, FIELD_VALUE, PAGE_CHAN
 
 # Um clique pode só trocar uma aba ou abrir um menu: conta o texto e o estado dos elementos, não só o tamanho
 _PAGE_FINGERPRINT = """() => {
+  // Iframe escondido (anúncio, chat, contador) não é o que a pessoa vê: não conta como mudança
+  if (window !== window.top && (window.innerWidth < 2 || window.innerHeight < 2)) return '';
   const hash = (seed, text) => {
     let value = seed;
     for (let i = 0; i < text.length; i++) value = (value * 31 + text.charCodeAt(i)) | 0;
@@ -48,6 +50,8 @@ _POLL_SECONDS = 0.1
 # conferir depois é uma pergunta só, sem ler o texto da página. Mudança de estilo, como uma
 # animação, não conta, senão um carrossel faria todo passo esperar o tempo máximo
 _QUIET_PROBE = """() => {
+  // Iframe escondido que muda sozinho (widget de chat, contador) fazia todo passo esperar o máximo
+  if (window !== window.top && (window.innerWidth < 2 || window.innerHeight < 2)) return 1e9;
   let state = window.__dittoQuiet;
   if (!state) {
     state = { last: performance.now() };
@@ -92,8 +96,9 @@ def wait_until_quiet(
     busy: Callable[[], bool] = lambda: False,
     quiet_seconds: float,
     max_seconds: float,
-) -> None:
+) -> bool:
     """Espera a página ficar parada por um tempo. Uma animação sem fim só custa o máximo.
+    Devolve se a página parou antes do tempo máximo.
 
     Cada pergunta ao Chrome atravessa a rede quando ele está no computador da pessoa: em vez de
     fotografar a página várias vezes, pergunta uma vez por quadro há quanto tempo ele está parado
@@ -101,7 +106,7 @@ def wait_until_quiet(
     try:
         page.wait_for_load_state("domcontentloaded", timeout=_LOAD_WAIT_MS)
     except PlaywrightError:
-        return
+        return False
     started = time.monotonic()
     deadline = started + max_seconds
     while True:
@@ -111,13 +116,15 @@ def wait_until_quiet(
             # Parada de antes da ação não vale: o site pode responder um instante depois
             quiet = min(_quiet_for(page, max_seconds), time.monotonic() - started)
             missing = quiet_seconds - quiet
+        if missing <= 0:
+            return True
         left = deadline - time.monotonic()
-        if missing <= 0 or left <= 0:
-            return
+        if left <= 0:
+            return False
         try:
             page.wait_for_timeout(max(min(missing, left), _MIN_WAIT_SECONDS) * 1000)
         except PlaywrightError:
-            return
+            return False
 
 
 def capture_state(page: Page) -> PageState:

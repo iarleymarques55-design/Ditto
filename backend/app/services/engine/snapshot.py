@@ -14,10 +14,16 @@ _COLLECT_ELEMENTS = """
     '[role=tab],[role=option],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=listbox],' +
     '[role=textbox],[role=searchbox],' +
     '[contenteditable=true],[contenteditable=""],[onclick]';
+  // Os vizinhos de cada elemento também passam por aqui: numa página enorme, como uma agenda,
+  // medir o mesmo elemento de novo a cada vizinho deixava a leitura lenta
+  const visibility = new Map();
   const isVisible = (el) => {
+    if (visibility.has(el)) return visibility.get(el);
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    visibility.set(el, visible);
+    return visible;
   };
   const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
   const textOf = (el) => {

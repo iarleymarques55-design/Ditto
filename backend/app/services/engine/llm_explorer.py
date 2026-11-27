@@ -31,6 +31,7 @@ O que você fizer vira uma gravação que o Ditto vai repetir depois, sem você.
 
 Tudo o que você sabe da tela está neste JSON:
 - "elementos_da_pagina": o que dá para clicar, digitar ou escolher, pelo "indice".
+  Campos vazios (texto, rotulo, dica, tag, tipo) não aparecem.
 - "texto_da_tela": o texto visível agora.
 - "dados_na_tela": tabelas e pares "Rótulo: valor" que dá para guardar.
 - "resultado_do_ultimo_passo": o que o Ditto observou de fato depois do seu último passo.
